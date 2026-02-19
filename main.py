@@ -11,60 +11,71 @@ PORT = int(os.getenv("PORT", 8080))
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Словарь для хранения аккаунтов { "username": last_seen_timestamp }
+# Данные мониторинга
 accounts = {}
-# ID чата, где будет висеть статус (узнается после /start в группе)
 status_chat_id = None
 status_message_id = None
 
 @dp.message(CommandStart())
 async def start_command(message: types.Message):
-    global status_chat_id
+    global status_chat_id, status_message_id
     status_chat_id = message.chat.id
-    await message.answer("Система мониторинга запущена в этом чате!")
+    status_message_id = None # Сбрасываем, чтобы создать новое сообщение в этом чате
+    await message.answer("✅ Система мониторинга активирована в этом чате!\nОжидаю сигналы от Roblox...")
 
-# Функция для обновления сообщения со статусом
 async def update_status_message():
     global status_message_id
-    if not status_chat_id: return
+    if not status_chat_id:
+        return
 
-    text = "📊 **Статус Roblox аккаунтов:**\n\n"
     current_time = time.time()
+    text = "📊 **Статус Roblox аккаунтов:**\n\n"
     
     if not accounts:
-        text += "Ожидание сигналов от аккаунтов..."
+        text += "⏳ Ожидание первого сигнала от скрипта..."
     else:
         for user, last_seen in accounts.items():
-            # Если сигнала не было больше 90 секунд — аккаунт оффлайн
-            status = "🟢 В игре" if current_time - last_seen < 90 else "🔴 Вылетел/Оффлайн"
-            text += f"👤 {user}: {status}\n"
+            # Если сигнала не было больше 90 секунд — оффлайн
+            is_online = current_time - last_seen < 90
+            status = "🟢 В игре" if is_online else "🔴 Вылетел"
+            text += f"👤 `{user}`: {status}\n"
 
     try:
         if status_message_id is None:
-            msg = await bot.send_message(status_chat_id, text, parse_mode="Markdown")
+            # Отправляем новое сообщение
+            msg = await bot.send_message(chat_id=status_chat_id, text=text, parse_mode="Markdown")
             status_message_id = msg.message_id
         else:
-            await bot.edit_message_text(text, status_chat_id, status_message_id, parse_mode="Markdown")
+            # Редактируем существующее (используем именованные аргументы)
+            await bot.edit_message_text(
+                text=text,
+                chat_id=status_chat_id,
+                message_id=status_message_id,
+                parse_mode="Markdown"
+            )
     except Exception as e:
         print(f"Ошибка обновления: {e}")
+        # Если сообщение удалили, сбрасываем ID, чтобы создать новое
+        if "message to edit not found" in str(e).lower():
+            status_message_id = None
 
-# Обработчик сигналов от Roblox (API)
 async def handle_signal(request):
-    data = await request.json()
-    username = data.get("username")
-    if username:
-        accounts[username] = time.time() # Обновляем время
-        return web.Response(text="OK")
+    try:
+        data = await request.json()
+        username = data.get("username")
+        if username:
+            accounts[username] = time.time()
+            return web.Response(text="OK")
+    except Exception as e:
+        print(f"Ошибка API: {e}")
     return web.Response(text="Error", status=400)
 
-# Фоновая задача для обновления статуса каждые 30 секунд
 async def status_updater():
     while True:
         await update_status_message()
-        await asyncio.sleep(30)
+        await asyncio.sleep(20) # Обновляем каждые 20 секунд
 
 async def main():
-    # Запуск веб-сервера для приема сигналов
     app = web.Application()
     app.router.add_post('/signal', handle_signal)
     runner = web.AppRunner(app)
