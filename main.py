@@ -2,7 +2,7 @@ import os
 import asyncio
 import time
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
+from aiogram.filters import Command
 from aiohttp import web
 
 TOKEN = os.getenv("BOT_TOKEN")
@@ -16,48 +16,61 @@ accounts = {}
 status_chat_id = None
 status_message_id = None
 
-@dp.message(CommandStart())
-async def start_command(message: types.Message):
+# Функция для сброса и создания нового сообщения статуса
+async def reset_status_msg(chat_id):
     global status_chat_id, status_message_id
-    status_chat_id = message.chat.id
-    status_message_id = None # Сбрасываем, чтобы создать новое сообщение в этом чате
-    await message.answer("✅ Система мониторинга активирована в этом чате!\nОжидаю сигналы от Roblox...")
+    # Попробуем удалить старое сообщение, если оно было
+    if status_chat_id and status_message_id:
+        try:
+            await bot.delete_message(status_chat_id, status_message_id)
+        except:
+            pass
+    
+    status_chat_id = chat_id
+    status_message_id = None
+    msg = await bot.send_message(chat_id, "⏳ Инициализация таблицы статусов...")
+    status_message_id = msg.message_id
+
+@dp.message(Command("start", "hello"))
+async def hello_command(message: types.Message):
+    await message.answer("Привет! Это бот для мониторинга Roblox. Используй /ping в группе, чтобы закрепить мониторинг.")
+
+@dp.message(Command("ping"))
+async def ping_command(message: types.Message):
+    await reset_status_msg(message.chat.id)
 
 async def update_status_message():
-    global status_message_id
-    if not status_chat_id:
+    global status_message_id, status_chat_id
+    if not status_chat_id or not status_message_id:
         return
 
     current_time = time.time()
-    text = "📊 **Статус Roblox аккаунтов:**\n\n"
+    text = "📊 **Мониторинг Roblox Аккаунтов**\n"
+    text += f"Последнее обновление: {time.strftime('%H:%M:%S')}\n\n"
     
     if not accounts:
-        text += "⏳ Ожидание первого сигнала от скрипта..."
+        text += "⏳ Ожидание сигналов от скриптов..."
     else:
-        for user, last_seen in accounts.items():
-            # Если сигнала не было больше 90 секунд — оффлайн
+        # Сортируем ники, чтобы список не прыгал
+        sorted_users = sorted(accounts.keys())
+        for user in sorted_users:
+            last_seen = accounts[user]
             is_online = current_time - last_seen < 90
             status = "🟢 В игре" if is_online else "🔴 Вылетел"
             text += f"👤 `{user}`: {status}\n"
 
     try:
-        if status_message_id is None:
-            # Отправляем новое сообщение
-            msg = await bot.send_message(chat_id=status_chat_id, text=text, parse_mode="Markdown")
-            status_message_id = msg.message_id
-        else:
-            # Редактируем существующее (используем именованные аргументы)
-            await bot.edit_message_text(
-                text=text,
-                chat_id=status_chat_id,
-                message_id=status_message_id,
-                parse_mode="Markdown"
-            )
+        await bot.edit_message_text(
+            text=text,
+            chat_id=status_chat_id,
+            message_id=status_message_id,
+            parse_mode="Markdown"
+        )
     except Exception as e:
-        print(f"Ошибка обновления: {e}")
-        # Если сообщение удалили, сбрасываем ID, чтобы создать новое
+        # Если сообщение удалили вручную — сбрасываем, чтобы создать новое при след. цикле
         if "message to edit not found" in str(e).lower():
             status_message_id = None
+        print(f"Ошибка обновления: {e}")
 
 async def handle_signal(request):
     try:
@@ -73,7 +86,7 @@ async def handle_signal(request):
 async def status_updater():
     while True:
         await update_status_message()
-        await asyncio.sleep(20) # Обновляем каждые 20 секунд
+        await asyncio.sleep(15) # Чуть быстрее обновление
 
 async def main():
     app = web.Application()
