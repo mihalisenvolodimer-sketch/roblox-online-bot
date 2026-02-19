@@ -161,57 +161,51 @@ async def list_players(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(message)
 
-async def check_players(app):
-    logger.info("Starting monitoring...")
-    await asyncio.sleep(5)
-    
-    while True:
-        try:
-            for chat_id, users in list(tracked_players.items()):
-                for username in list(users.keys()):
-                    try:
-                        online = is_player_online(username)
+async def check_players(context):
+    app = context.bot._bot.get_bot()
+    try:
+        for chat_id, users in list(tracked_players.items()):
+            for username in list(users.keys()):
+                try:
+                    online = is_player_online(username)
 
-                        if online is None:
-                            continue
-
-                        if chat_id not in player_status:
-                            player_status[chat_id] = {}
-
-                        last_status = player_status[chat_id].get(username, False)
-
-                        if online != last_status:
-                            player_status[chat_id][username] = online
-                            status_text = "🟢 зашел в игру!" if online else "🔴 вышел из игры!"
-                            message_id = tracked_players[chat_id][username]
-
-                            try:
-                                if message_id:
-                                    await app.bot.edit_message_text(
-                                        chat_id=int(chat_id),
-                                        message_id=message_id,
-                                        text=f"👤 {username}\n{status_text}",
-                                        parse_mode="HTML"
-                                    )
-                                else:
-                                    msg = await app.bot.send_message(
-                                        int(chat_id),
-                                        f"👤 {username}\n{status_text}",
-                                        parse_mode="HTML"
-                                    )
-                                    tracked_players[chat_id][username] = msg.message_id
-                                    save_data()
-                            except Exception as e:
-                                logger.error(f"Error sending: {e}")
-
-                    except Exception as e:
-                        logger.error(f"Error: {e}")
+                    if online is None:
                         continue
 
-            await asyncio.sleep(CHECK_INTERVAL)
-        except Exception as e:
-            logger.error(f"Error: {e}")
-            await asyncio.sleep(CHECK_INTERVAL)
+                    if chat_id not in player_status:
+                        player_status[chat_id] = {}
+
+                    last_status = player_status[chat_id].get(username, False)
+
+                    if online != last_status:
+                        player_status[chat_id][username] = online
+                        status_text = "🟢 зашел в игру!" if online else "🔴 вышел из игры!"
+                        message_id = tracked_players[chat_id][username]
+
+                        try:
+                            if message_id:
+                                await app.bot.edit_message_text(
+                                    chat_id=int(chat_id),
+                                    message_id=message_id,
+                                    text=f"👤 {username}\n{status_text}",
+                                    parse_mode="HTML"
+                                )
+                            else:
+                                msg = await app.bot.send_message(
+                                    int(chat_id),
+                                    f"👤 {username}\n{status_text}",
+                                    parse_mode="HTML"
+                                )
+                                tracked_players[chat_id][username] = msg.message_id
+                                save_data()
+                        except Exception as e:
+                            logger.error(f"Error sending: {e}")
+
+                except Exception as e:
+                    logger.error(f"Error: {e}")
+                    continue
+    except Exception as e:
+        logger.error(f"Error in check_players: {e}")
 
 async def main():
     logger.info("Starting bot...")
@@ -224,7 +218,7 @@ async def main():
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("list", list_players))
 
-    asyncio.create_task(check_players(app))
+    app.job_queue.run_repeating(check_players, interval=CHECK_INTERVAL, first=5)
 
     logger.info("Bot ready!")
     await app.run_polling(allowed_updates=Update.ALL_TYPES)
