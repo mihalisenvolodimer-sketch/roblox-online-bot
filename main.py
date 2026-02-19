@@ -19,8 +19,8 @@ accounts = {}
 start_times = {}   
 last_status = {}    
 notifications = {} 
-disabled_users = {} # {user_id: "all" or [rbx_nicks]}
-global_disable = False # Флаг для /disable all
+disabled_users = {} 
+global_disable = False
 
 status_chat_id = None
 status_message_id = None
@@ -38,14 +38,38 @@ async def init_db():
     if REDIS_URL:
         try:
             db = redis.from_url(REDIS_URL, decode_responses=True)
+            
+            # 1. Пробуем загрузить новые данные (V5)
             data = await db.get("roblox_v5_data")
             if data:
                 saved = json.loads(data)
                 notifications.update(saved.get("notifs", {}))
                 disabled_users.update(saved.get("disabled", {}))
                 global_disable = saved.get("global_disable", False)
-            print("✅ БД загружена")
-        except: print("❌ Ошибка БД")
+                print("✅ Данные V5 загружены")
+            
+            # 2. МИГРАЦИЯ: Если в V5 пусто, ищем в самых старых ключах
+            if not notifications:
+                old_keys = ["roblox_notifications", "roblox_v3_configs", "roblox_v4_data"]
+                for key in old_keys:
+                    old_raw = await db.get(key)
+                    if old_raw:
+                        old_data = json.loads(old_raw)
+                        # Формат в старых ключах мог быть разным (словарь или список)
+                        if isinstance(old_data, dict):
+                            # Если это старый формат notifications (rbx: mention)
+                            for k, v in old_data.items():
+                                if k == "notifs": # если это v4 формат
+                                    notifications.update(v)
+                                else:
+                                    if k not in notifications: notifications[k] = []
+                                    if isinstance(v, list): notifications[k].extend(v)
+                                    else: notifications[k].append(v)
+                        print(f"🔄 Мигрированы данные из ключа: {key}")
+                        await save_to_db() # Сразу сохраняем в новый формат
+                        break
+        except Exception as e:
+            print(f"❌ Ошибка БД: {e}")
 
 async def save_to_db():
     if db:
@@ -58,54 +82,60 @@ async def save_to_db():
             await db.set("roblox_v5_data", json.dumps(payload))
         except: pass
 
-@dp.message(Command("disable"))
-async def disable_cmd(message: types.Message, command: CommandObject):
-    global global_disable
-    u = message.from_user
-    uid = f"@{u.username}" if u.username else f"ID:{u.id}"
-    arg = command.args.strip() if command.args else None
+@dp.message(Command("add"))
+async def add_notify(message: types.Message, command: CommandObject):
+    args = command.args.split() if command.args else []
+    if not args:
+        return await message.answer("Использование: <code>/add Nick @ping1 @ping2</code>", parse_mode="HTML")
     
-    if arg == "all":
-        global_disable = True
-        await message.answer("⚠️ <b>Глобальная пауза</b>: Пинги отключены для ВСЕХ.", parse_mode="HTML")
-    elif not arg:
-        disabled_users[uid] = "all"
-        await message.answer(f"🔇 Ваши уведомления отключены для всех аккаунтов.")
-    else:
-        if uid not in disabled_users or disabled_users[uid] == "all": disabled_users[uid] = []
-        if arg not in disabled_users[uid]: disabled_users[uid].append(arg)
-        await message.answer(f"🔇 Ваши уведомления для <code>{safe_html(arg)}</code> отключены.", parse_mode="HTML")
-    
-    await save_to_db()
+    rbx_name = args[0]
+    mentions_to_add = []
 
-@dp.message(Command("enable"))
-async def enable_cmd(message: types.Message, command: CommandObject):
-    global global_disable
-    u = message.from_user
-    uid = f"@{u.username}" if u.username else f"ID:{u.id}"
-    arg = command.args.strip() if command.args else None
-
-    if arg == "all":
-        global_disable = False
-        await message.answer("🔊 Пинги снова работают для всех.")
+    if len(args) > 1:
+        mentions_to_add = args[1:]
+    elif message.reply_to_message:
+        u = message.reply_to_message.from_user
+        mentions_to_add.append(f"@{u.username}" if u.username else f"<a href='tg://user?id={u.id}'>{safe_html(u.full_name)}</a>")
     else:
-        if uid in disabled_users:
-            del disabled_users[uid]
-            await message.answer("🔊 Ваши уведомления снова включены.")
-        else:
-            await message.answer("У вас и так всё включено.")
+        u = message.from_user
+        mentions_to_add.append(f"@{u.username}" if u.username else f"<a href='tg://user?id={u.id}'>{safe_html(u.full_name)}</a>")
+
+    if rbx_name not in notifications:
+        notifications[rbx_name] = []
     
-    await save_to_db()
+    added = 0
+    for m in mentions_to_add:
+        if m not in notifications[rbx_name]:
+            notifications[rbx_name].append(m)
+            added += 1
+    
+    if added > 0:
+        await save_to_db()
+        await message.answer(f"✅ Добавлено ({added}) для <code>{safe_html(rbx_name)}</code>", parse_mode="HTML")
+    else:
+        await message.answer("Пинги уже в списке.")
+
+@dp.message(Command("list"))
+async def list_notifications(message: types.Message):
+    if not notifications:
+        return await message.answer("Список пуст.")
+    
+    text = "<b>🔔 Настройки пингов:</b>\n\n"
+    for rbx, users in notifications.items():
+        if not users: continue
+        text += f"• <code>{safe_html(rbx)}</code>: {', '.join(users)}\n"
+    await message.answer(text, parse_mode="HTML")
 
 @dp.message(Command("remove"))
 async def remove_cmd(message: types.Message, command: CommandObject):
     u = message.from_user
-    my_mention = f"@{u.username}" if u.username else f"tg://user?id={u.id}"
+    my_mention = f"@{u.username}" if u.username else f"ID:{u.id}"
     args = command.args.split() if command.args else []
     
     if not args:
+        # Удалить себя отовсюду
         for rbx in notifications:
-            notifications[rbx] = [m for m in notifications[rbx] if my_mention not in m]
+            notifications[rbx] = [m for m in notifications[rbx] if my_mention not in m and str(u.id) not in m]
         await message.answer("🗑 Вы удалены из всех списков.")
     else:
         rbx_name = args[0]
@@ -145,23 +175,22 @@ async def update_status_message():
     if not accounts:
         text = "<b>📊 Мониторинг</b>\n⚠️ Ожидание сигналов..."
     else:
-        text = f"<b>📊 Мониторинг Roblox</b>\n🕒 {time.strftime('%H:%M:%S')}{' ❗(PAUSE)' if global_disable else ''}\n\n"
+        pause_label = " ❗(PAUSE)" if global_disable else ""
+        text = f"<b>📊 Мониторинг Roblox</b>\n🕒 {time.strftime('%H:%M:%S')}{pause_label}\n\n"
         for user in sorted(accounts.keys()):
             is_online = now - accounts[user] < 120
             
             if user in last_status and last_status[user] and not is_online:
                 duration = format_duration(now - start_times.get(user, now))
                 if user in notifications and not global_disable:
-                    # Проверяем, кто НЕ на паузе
+                    # Умная фильтрация мутов
                     active_mentions = []
                     for m in notifications[user]:
-                        # Пытаемся сопоставить упоминание с записью в disabled_users
                         is_muted = False
                         for uid, status in disabled_users.items():
-                            if uid in m: # если ID или юзернейм совпадает с записью в базе
+                            if uid in m:
                                 if status == "all" or user in status:
-                                    is_muted = True
-                                    break
+                                    is_muted = True; break
                         if not is_muted: active_mentions.append(m)
                     
                     if active_mentions:
@@ -202,8 +231,7 @@ async def main():
 
 async def status_updater():
     while True:
-        await update_status_message()
-        await asyncio.sleep(30)
+        await update_status_message(); await asyncio.sleep(30)
 
 if __name__ == "__main__":
     asyncio.run(main())
