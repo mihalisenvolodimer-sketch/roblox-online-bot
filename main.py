@@ -19,7 +19,7 @@ status_message_id = None
 async def reset_status_msg(chat_id):
     global status_chat_id, status_message_id
     
-    # Пытаемся удалить старое сообщение перед созданием нового
+    # 1. Удаляем старое сообщение мониторинга, если оно было
     if status_chat_id and status_message_id:
         try:
             await bot.delete_message(status_chat_id, status_message_id)
@@ -28,27 +28,33 @@ async def reset_status_msg(chat_id):
     
     status_chat_id = chat_id
     
-    # Отправляем новое сообщение
+    # 2. Отправляем новое сообщение
     msg = await bot.send_message(chat_id, "⏳ Инициализация таблицы статусов...")
     status_message_id = msg.message_id
     
     try:
-        # Закрепляем сообщение
+        # 3. Закрепляем новое сообщение
         await bot.pin_chat_message(chat_id, status_message_id, disable_notification=True)
         
-        # Пытаемся найти и удалить системное сообщение о закрепе (оно обычно идет следующим)
-        # Это работает не всегда идеально, но помогает очистить чат
+        # 4. Удаляем системное сообщение о закреплении
+        # Системное сообщение обычно имеет ID на 1 больше, чем ID закрепленного сообщения
+        await asyncio.sleep(1) # Небольшая пауза, чтобы ТГ успел создать системное сообщение
+        try:
+            await bot.delete_message(chat_id, status_message_id + 1)
+        except:
+            # Если не угадали с ID (в активных чатах), просто пропускаем
+            pass
+            
     except Exception as e:
         print(f"Ошибка закрепления: {e}")
 
 @dp.message(Command("start", "hello"))
 async def hello_command(message: types.Message):
-    # Команда работает, но мы не регистрируем её в BotFather, поэтому её нет в списке
-    await message.answer("Бот работает. Используйте /ping для вывода мониторинга.")
+    await message.answer("Бот работает. Используйте /ping для запуска мониторинга.")
 
 @dp.message(Command("ping"))
 async def ping_command(message: types.Message):
-    # Удаляем само сообщение пользователя с командой /ping, чтобы было чисто
+    # Удаляем саму команду /ping от пользователя
     try:
         await message.delete()
     except:
@@ -70,7 +76,6 @@ async def update_status_message():
         sorted_users = sorted(accounts.keys())
         for user in sorted_users:
             last_seen = accounts[user]
-            # Если сигнала нет 90 секунд — оффлайн
             is_online = current_time - last_seen < 90
             status = "🟢 В игре" if is_online else "🔴 Вылетел"
             text += f"👤 `{user}`: {status}\n"
@@ -85,7 +90,6 @@ async def update_status_message():
     except Exception as e:
         if "message to edit not found" in str(e).lower():
             status_message_id = None
-        # Ошибку о том, что текст не изменился, игнорируем
         if "message is not modified" not in str(e).lower():
             print(f"Ошибка обновления: {e}")
 
