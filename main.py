@@ -68,28 +68,7 @@ async def save_to_db():
             await db.set("roblox_v5_data", json.dumps(payload))
         except: pass
 
-# --- Обработчики команд ---
-
-@dp.message(Command("start"))
-async def start_handler(message: types.Message):
-    guide = (
-        "<b>🚀 Инструкция по управлению мониторингом</b>\n\n"
-        "<b>1. Настройка уведомлений:</b>\n"
-        "• <code>/add Ник</code> — подписаться на уведомления о вылете аккаунта.\n"
-        "• <code>/add Ник @user</code> — подписать другого человека.\n"
-        "• <code>/remove Ник</code> — перестать получать уведомления для этого ника.\n\n"
-        "<b>2. Управление таблицей:</b>\n"
-        "• <code>/ping</code> — создать новую таблицу. Старая таблица удалится, а новая закрепится в чате автоматически.\n"
-        "• <code>/img_create</code> — сгенерировать картинку с текущим состоянием всех аккаунтов.\n\n"
-        "<b>3. Режим паузы (Мут):</b>\n"
-        "• <code>/disable</code> — выключить все уведомления для ВАС (в списке появится 🔇).\n"
-        "• <code>/disable Ник</code> — выключить уведомления только для конкретного аккаунта.\n"
-        "• <code>/disable all</code> — поставить весь бот на паузу (уведомления не придут никому).\n"
-        "• <code>/enable</code> — включить ваши уведомления обратно.\n\n"
-        "<b>4. Просмотр данных:</b>\n"
-        "• <code>/list</code> — посмотреть, кто на какие аккаунты подписан и у кого выключен звук."
-    )
-    await message.answer(guide, parse_mode="HTML")
+# --- Обработчики ---
 
 @dp.message(Command("list"))
 async def list_notifications(message: types.Message):
@@ -97,41 +76,76 @@ async def list_notifications(message: types.Message):
     header = "<b>🔔 Настройки пингов:</b>"
     if global_disable: header += " ⚠️ (ГЛОБАЛЬНАЯ ПАУЗА)"
     text = f"{header}\n\n"
+    
     for rbx, users in notifications.items():
         if not users: continue
         fmt_users = []
         for u in users:
             is_muted = False
-            u_clean = u.lower().strip()
+            u_low = u.lower().strip()
+            # Улучшенный поиск мута (частичное совпадение)
             for d_uid, d_st in disabled_users.items():
-                if d_uid.lower() in u_clean:
+                d_uid_low = d_uid.lower().strip()
+                if (d_uid_low in u_low or u_low in d_uid_low):
                     if d_st == "all" or rbx in d_st:
                         is_muted = True; break
             fmt_users.append(f"{u}{' 🔇' if is_muted else ''}")
         text += f"• <code>{safe_html(rbx)}</code>: {', '.join(fmt_users)}\n"
     await message.answer(text, parse_mode="HTML")
 
-@dp.message(Command("Img_Create"))
+@dp.message(Command("img_create"))
 async def create_image_status(message: types.Message):
-    if not accounts: return await message.answer("Нет данных.")
-    width, height = 600, 100 + (len(accounts) * 40)
-    img = Image.new('RGB', (width, height), color=(30, 30, 30))
-    draw = ImageDraw.Draw(img)
-    draw.text((20, 20), f"Roblox Status - {time.strftime('%H:%M:%S')}", fill=(255, 255, 255))
-    draw.line((20, 50, 580, 50), fill=(100, 100, 100))
-    y, now = 70, time.time()
-    for user in sorted(accounts.keys()):
-        is_online = now - accounts[user] < 120
-        color = (0, 255, 0) if is_online else (255, 0, 0)
-        draw.ellipse((20, y, 35, y+15), fill=color)
-        session = f"({format_duration(now - start_times[user])})" if is_online and user in start_times else ""
-        draw.text((50, y), f"{user} {session}", fill=(255, 255, 255))
-        draw.text((450, y), "ONLINE" if is_online else "OFFLINE", fill=color)
-        y += 40
-    buf = io.BytesIO()
-    img.save(buf, format='PNG')
-    buf.seek(0)
-    await message.answer_photo(BufferedInputFile(buf.read(), filename="status.png"), caption="📊 Текущий отчет")
+    if not accounts: return await message.answer("Нет данных от аккаунтов (никто не в сети).")
+    
+    try:
+        width, height = 650, 120 + (len(accounts) * 45)
+        img = Image.new('RGB', (width, height), color=(25, 25, 25))
+        draw = ImageDraw.Draw(img)
+        
+        # Попытка загрузить шрифт, иначе стандартный
+        try:
+            font_main = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
+        except:
+            font_main = ImageFont.load_default()
+            font_small = ImageFont.load_default()
+
+        draw.text((30, 25), f"ROBLOX MONITORING REPORT", fill=(200, 200, 200), font=font_main)
+        draw.text((30, 55), f"Time: {time.strftime('%d.%m %H:%M:%S')}", fill=(100, 100, 100), font=font_small)
+        draw.line((30, 85, 620, 85), fill=(60, 60, 60), width=2)
+
+        y, now = 105, time.time()
+        for user in sorted(accounts.keys()):
+            is_online = now - accounts[user] < 120
+            color = (50, 255, 50) if is_online else (255, 50, 50)
+            
+            # Индикатор
+            draw.rounded_rectangle([30, y, 620, y+35], radius=5, fill=(40, 40, 40))
+            draw.ellipse((45, y+10, 60, y+25), fill=color)
+            
+            session = f"Online: {format_duration(now - start_times[user])}" if is_online and user in start_times else "Offline"
+            draw.text((80, y+7), f"{user}", fill=(255, 255, 255), font=font_small)
+            draw.text((400, y+7), session, fill=(180, 180, 180), font=font_small)
+            y += 45
+
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        await message.answer_photo(BufferedInputFile(buf.read(), filename="report.png"), caption="📊 Отчет сформирован")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка генерации: {e}")
+
+@dp.message(Command("add"))
+async def add_notify(message: types.Message, command: CommandObject):
+    args = command.args.split() if command.args else []
+    if not args: return await message.answer("Использование: /add Ник")
+    rbx_name = args[0]
+    mentions = args[1:] if len(args) > 1 else [get_user_id(message)]
+    if rbx_name not in notifications: notifications[rbx_name] = []
+    for m in mentions:
+        if m not in notifications[rbx_name]: notifications[rbx_name].append(m)
+    await save_to_db()
+    await message.answer(f"✅ Пинги обновлены для <code>{safe_html(rbx_name)}</code>", parse_mode="HTML")
 
 @dp.message(Command("disable"))
 async def disable_cmd(message: types.Message, command: CommandObject):
@@ -163,49 +177,16 @@ async def enable_cmd(message: types.Message, command: CommandObject):
         await message.answer("🔊 Ваши пинги снова включены.")
     await save_to_db()
 
-@dp.message(Command("add"))
-async def add_notify(message: types.Message, command: CommandObject):
-    args = command.args.split() if command.args else []
-    if not args: return await message.answer("Использование: /add Ник")
-    rbx_name = args[0]
-    mentions = args[1:] if len(args) > 1 else [get_user_id(message)]
-    if rbx_name not in notifications: notifications[rbx_name] = []
-    for m in mentions:
-        if m not in notifications[rbx_name]: notifications[rbx_name].append(m)
-    await save_to_db()
-    await message.answer(f"✅ Список пингов обновлен для <code>{safe_html(rbx_name)}</code>", parse_mode="HTML")
-
-@dp.message(Command("remove"))
-async def remove_cmd(message: types.Message, command: CommandObject):
-    uid = get_user_id(message).lower()
-    args = command.args.split() if command.args else []
-    if not args:
-        for rbx in notifications:
-            notifications[rbx] = [m for m in notifications[rbx] if uid not in m.lower()]
-        await message.answer("🗑 Вы удалены из всех списков.")
-    else:
-        rbx_name = args[0]
-        if rbx_name in notifications:
-            notifications[rbx_name] = [m for m in notifications[rbx_name] if uid not in m.lower()]
-            await message.answer(f"✅ Пинг удален для {rbx_name}")
-    await save_to_db()
-
 @dp.message(Command("ping"))
 async def ping_cmd(message: types.Message):
     global status_chat_id, status_message_id
     try: await message.delete()
-    except: pass
-    try:
-        chat = await bot.get_chat(message.chat.id)
-        if chat.pinned_message and chat.pinned_message.from_user.id == bot.id:
-            await bot.delete_message(message.chat.id, chat.pinned_message.message_id)
     except: pass
     status_chat_id = message.chat.id
     msg = await bot.send_message(chat_id=str(status_chat_id), text="⏳ Запуск...")
     status_message_id = msg.message_id
     try:
         await bot.pin_chat_message(chat_id=str(status_chat_id), message_id=status_message_id, disable_notification=True)
-        await bot.delete_message(chat_id=str(status_chat_id), message_id=status_message_id + 1)
     except: pass
 
 async def update_status_message():
@@ -225,7 +206,8 @@ async def update_status_message():
                     for m in notifications[user]:
                         muted, m_low = False, m.lower()
                         for d_uid, d_st in disabled_users.items():
-                            if d_uid.lower() in m_low and (d_st == "all" or user in d_st):
+                            d_uid_low = d_uid.lower()
+                            if (d_uid_low in m_low or m_low in d_uid_low) and (d_st == "all" or user in d_st):
                                 muted = True; break
                         if not muted: active.append(m)
                     if active:
@@ -233,10 +215,11 @@ async def update_status_message():
                         except: pass
                 start_times.pop(user, None)
             last_status[user] = is_online
+            text += f"{'🟢' if is_online else '🔴'} <code>{safe_html(user)}</code>"
             if is_online:
                 if user not in start_times: start_times[user] = now
-                text += f"🟢 <code>{safe_html(user)}</code> | ⏱ {format_duration(now - start_times[user])}\n"
-            else: text += f"🔴 <code>{safe_html(user)}</code>\n"
+                text += f" | ⏱ {format_duration(now - start_times[user])}"
+            text += "\n"
     try: await bot.edit_message_text(text=text, chat_id=str(status_chat_id), message_id=status_message_id, parse_mode="HTML")
     except: pass
 
