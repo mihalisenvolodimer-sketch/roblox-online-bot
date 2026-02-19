@@ -59,7 +59,7 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tracked_players[chat_id].append(username)
         save_data()
 
-    await update.message.reply_text(f"✅ Отслеживание: {username}")
+    await update.message.reply_text(f"✅ Отслеживание включено: {username}")
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -69,4 +69,51 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     arg = context.args[0]
     chat_id = str(update.effective_chat.id)
 
-    if chat
+    if chat_id not in tracked_players:
+        return
+
+    if arg.lower() == "all":
+        tracked_players[chat_id] = []
+        save_data()
+        await update.message.reply_text("⛔ Всё остановлено")
+    else:
+        if arg in tracked_players[chat_id]:
+            tracked_players[chat_id].remove(arg)
+            save_data()
+            await update.message.reply_text(f"⛔ Остановлено: {arg}")
+
+async def check_players(app):
+    while True:
+        for chat_id, users in tracked_players.items():
+            for username in users:
+                online = is_player_online(username)
+
+                if online is None:
+                    continue
+
+                last_status = player_status.get(username, False)
+
+                if online and not last_status:
+                    await app.bot.send_message(chat_id, f"🟢 {username} зашел в игру!")
+
+                elif not online and last_status:
+                    await app.bot.send_message(chat_id, f"🔴 {username} вышел!")
+
+                player_status[username] = online
+
+        await asyncio.sleep(CHECK_INTERVAL)
+
+async def main():
+    load_data()
+
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("add", add))
+    app.add_handler(CommandHandler("stop", stop))
+
+    asyncio.create_task(check_players(app))
+
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
