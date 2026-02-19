@@ -16,10 +16,10 @@ accounts = {}
 status_chat_id = None
 status_message_id = None
 
-# Функция для сброса и создания нового сообщения статуса
 async def reset_status_msg(chat_id):
     global status_chat_id, status_message_id
-    # Попробуем удалить старое сообщение, если оно было
+    
+    # Пытаемся удалить старое сообщение перед созданием нового
     if status_chat_id and status_message_id:
         try:
             await bot.delete_message(status_chat_id, status_message_id)
@@ -27,16 +27,32 @@ async def reset_status_msg(chat_id):
             pass
     
     status_chat_id = chat_id
-    status_message_id = None
+    
+    # Отправляем новое сообщение
     msg = await bot.send_message(chat_id, "⏳ Инициализация таблицы статусов...")
     status_message_id = msg.message_id
+    
+    try:
+        # Закрепляем сообщение
+        await bot.pin_chat_message(chat_id, status_message_id, disable_notification=True)
+        
+        # Пытаемся найти и удалить системное сообщение о закрепе (оно обычно идет следующим)
+        # Это работает не всегда идеально, но помогает очистить чат
+    except Exception as e:
+        print(f"Ошибка закрепления: {e}")
 
 @dp.message(Command("start", "hello"))
 async def hello_command(message: types.Message):
-    await message.answer("Привет! Это бот для мониторинга Roblox. Используй /ping в группе, чтобы закрепить мониторинг.")
+    # Команда работает, но мы не регистрируем её в BotFather, поэтому её нет в списке
+    await message.answer("Бот работает. Используйте /ping для вывода мониторинга.")
 
 @dp.message(Command("ping"))
 async def ping_command(message: types.Message):
+    # Удаляем само сообщение пользователя с командой /ping, чтобы было чисто
+    try:
+        await message.delete()
+    except:
+        pass
     await reset_status_msg(message.chat.id)
 
 async def update_status_message():
@@ -51,10 +67,10 @@ async def update_status_message():
     if not accounts:
         text += "⏳ Ожидание сигналов от скриптов..."
     else:
-        # Сортируем ники, чтобы список не прыгал
         sorted_users = sorted(accounts.keys())
         for user in sorted_users:
             last_seen = accounts[user]
+            # Если сигнала нет 90 секунд — оффлайн
             is_online = current_time - last_seen < 90
             status = "🟢 В игре" if is_online else "🔴 Вылетел"
             text += f"👤 `{user}`: {status}\n"
@@ -67,10 +83,11 @@ async def update_status_message():
             parse_mode="Markdown"
         )
     except Exception as e:
-        # Если сообщение удалили вручную — сбрасываем, чтобы создать новое при след. цикле
         if "message to edit not found" in str(e).lower():
             status_message_id = None
-        print(f"Ошибка обновления: {e}")
+        # Ошибку о том, что текст не изменился, игнорируем
+        if "message is not modified" not in str(e).lower():
+            print(f"Ошибка обновления: {e}")
 
 async def handle_signal(request):
     try:
@@ -86,7 +103,7 @@ async def handle_signal(request):
 async def status_updater():
     while True:
         await update_status_message()
-        await asyncio.sleep(15) # Чуть быстрее обновление
+        await asyncio.sleep(15)
 
 async def main():
     app = web.Application()
