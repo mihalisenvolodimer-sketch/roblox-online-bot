@@ -61,6 +61,7 @@ async def add_notify(message: types.Message, command: CommandObject):
     else:
         u = message.from_user
         mention = f"@{u.username}" if u.username else f"<a href='tg://user?id={u.id}'>{safe_html(u.full_name)}</a>"
+    
     if rbx_name not in notifications: notifications[rbx_name] = []
     if mention not in notifications[rbx_name]:
         notifications[rbx_name].append(mention)
@@ -72,16 +73,19 @@ async def ping_cmd(message: types.Message):
     global status_chat_id, status_message_id
     try: await message.delete()
     except: pass
+    
     if status_chat_id and status_message_id:
-        try: await bot.delete_message(status_chat_id, status_message_id)
+        try: await bot.delete_message(chat_id=str(status_chat_id), message_id=status_message_id)
         except: pass
+            
     status_chat_id = message.chat.id
-    msg = await bot.send_message(status_chat_id, "⏳ Сбор данных...")
+    msg = await bot.send_message(chat_id=str(status_chat_id), text="⏳ Сбор данных...")
     status_message_id = msg.message_id
+    
     try:
-        await bot.pin_chat_message(status_chat_id, status_message_id, disable_notification=True)
+        await bot.pin_chat_message(chat_id=str(status_chat_id), message_id=status_message_id, disable_notification=True)
         await asyncio.sleep(1)
-        await bot.delete_message(status_chat_id, status_message_id + 1)
+        await bot.delete_message(chat_id=str(status_chat_id), message_id=status_message_id + 1)
     except: pass
 
 async def update_status_message():
@@ -93,20 +97,27 @@ async def update_status_message():
     else:
         text = f"<b>📊 Мониторинг Roblox</b>\nОбновлено: {time.strftime('%H:%M:%S')}\n\n"
         for user in sorted(accounts.keys()):
-            is_online = current_time - accounts[user] < 120 # Увеличил окно до 2 мин
+            is_online = current_time - accounts[user] < 120
             if user in last_status and last_status[user] and not is_online:
                 if user in notifications:
                     mentions = " ".join(notifications[user])
-                    try: await bot.send_message(status_chat_id, f"⚠️ <b>{safe_html(user)}</b> вылетел! {mentions}", parse_mode="HTML")
+                    try: 
+                        await bot.send_message(chat_id=str(status_chat_id), text=f"⚠️ <b>{safe_html(user)}</b> вылетел! {mentions}", parse_mode="HTML")
                     except: pass
             last_status[user] = is_online
             text += f"{'🟢' if is_online else '🔴'} <code>{safe_html(user)}</code>\n"
     
     try:
-        await bot.edit_message_text(text, status_chat_id, status_message_id, parse_mode="HTML")
+        # Ключевое исправление: передаем chat_id как str()
+        await bot.edit_message_text(
+            text=text, 
+            chat_id=str(status_chat_id), 
+            message_id=status_message_id, 
+            parse_mode="HTML"
+        )
     except Exception as e:
         if "message is not modified" not in str(e):
-            print(f"Ошибочка обновления: {e}")
+            print(f"❌ Ошибочка обновления: {e}")
 
 async def handle_signal(request):
     try:
@@ -114,7 +125,6 @@ async def handle_signal(request):
         if "username" in data:
             user = data["username"]
             accounts[user] = time.time()
-            # Принудительно вызываем обновление при получении сигнала
             asyncio.create_task(update_status_message())
             return web.Response(text="OK")
     except: pass
@@ -133,10 +143,9 @@ async def main():
     await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', PORT).start()
     
-    loop = asyncio.get_event_loop()
-    loop.create_task(status_updater())
+    asyncio.create_task(status_updater())
     
-    print("🚀 Бот запущен и готов к сигналам")
+    print("🚀 Бот запущен (FIX: ChatID as string)")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
