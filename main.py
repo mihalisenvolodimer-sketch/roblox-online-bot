@@ -21,103 +21,86 @@ notifications = {}
 status_chat_id = None
 status_message_id = None
 
-# Ручная очистка текста для HTML, чтобы не зависеть от версий aiogram
 def safe_html(text):
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 async def init_db():
     global db, notifications
     if REDIS_URL:
         try:
             db = redis.from_url(REDIS_URL, decode_responses=True)
-            data = await db.get("roblox_v3_configs")
+            # Пробуем оба ключа на всякий случай
+            data = await db.get("roblox_notifications") or await db.get("roblox_v3_configs")
             if data:
                 notifications.update(json.loads(data))
-            print("✅ Redis Connected")
+            print(f"✅ Redis Connected. Загружено записей: {len(notifications)}")
         except Exception as e:
             print(f"❌ Redis Error: {e}")
 
 async def save_to_db():
     if db:
-        await db.set("roblox_v3_configs", json.dumps(notifications))
+        try:
+            await db.set("roblox_notifications", json.dumps(notifications))
+        except Exception as e:
+            print(f"❌ Save Error: {e}")
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
-    await message.answer("Бот запущен. Используйте /ping для мониторинга.")
+    await message.answer("Бот работает. Напиши /ping чтобы создать таблицу.")
 
 @dp.message(Command("list"))
 async def list_notifications(message: types.Message):
     if not notifications:
-        return await message.answer("Список уведомлений пуст.")
-    
-    text = "<b>🔔 Список уведомлений:</b>\n\n"
+        return await message.answer("Список пуст.")
+    text = "<b>🔔 Настройки пингов:</b>\n"
     for rbx, users in notifications.items():
-        mentions = ", ".join(users)
-        text += f"• <code>{safe_html(rbx)}</code> — {mentions}\n"
+        text += f"• <code>{safe_html(rbx)}</code>: {', '.join(users)}\n"
     await message.answer(text, parse_mode="HTML")
 
 @dp.message(Command("add"))
 async def add_notify(message: types.Message, command: CommandObject):
     args = command.args.split() if command.args else []
     if not args:
-        return await message.answer("Использование: <code>/add Ник</code>", parse_mode="HTML")
+        return await message.answer("Нужен ник: <code>/add Nick</code>", parse_mode="HTML")
     
     rbx_name = args[0]
-    mention = None
-
     if len(args) > 1:
         mention = args[1]
     elif message.reply_to_message:
-        user = message.reply_to_message.from_user
-        mention = f"@{user.username}" if user.username else f"<a href='tg://user?id={user.id}'>{safe_html(user.full_name)}</a>"
+        u = message.reply_to_message.from_user
+        mention = f"@{u.username}" if u.username else f"<a href='tg://user?id={u.id}'>{safe_html(u.full_name)}</a>"
     else:
-        user = message.from_user
-        mention = f"@{user.username}" if user.username else f"<a href='tg://user?id={user.id}'>{safe_html(user.full_name)}</a>"
+        u = message.from_user
+        mention = f"@{u.username}" if u.username else f"<a href='tg://user?id={u.id}'>{safe_html(u.full_name)}</a>"
 
-    if rbx_name not in notifications:
-        notifications[rbx_name] = []
-    
+    if rbx_name not in notifications: notifications[rbx_name] = []
     if mention not in notifications[rbx_name]:
         notifications[rbx_name].append(mention)
         await save_to_db()
-        await message.answer(f"✅ Добавлен пинг для <code>{safe_html(rbx_name)}</code> юзеру {mention}", parse_mode="HTML")
-    else:
-        await message.answer("Этот юзер уже подписан на этот аккаунт.")
+        await message.answer(f"✅ Добавлен пинг {mention} для {safe_html(rbx_name)}", parse_mode="HTML")
 
 @dp.message(Command("remove"))
 async def remove_notify(message: types.Message, command: CommandObject):
-    if not command.args:
-        return await message.answer("Укажите ник аккаунта.")
-    
+    if not command.args: return await message.answer("Укажите ник.")
     rbx_name = command.args.strip()
     if rbx_name in notifications:
         del notifications[rbx_name]
         await save_to_db()
-        await message.answer(f"❌ Все уведомления для <code>{safe_html(rbx_name)}</code> удалены.", parse_mode="HTML")
-    else:
-        await message.answer("Ник не найден.")
-
-@dp.message(Command("delete"))
-async def delete_bot_messages(message: types.Message):
-    current_id = message.message_id
-    for i in range(50):
-        try: await bot.delete_message(message.chat.id, current_id - i)
-        except: continue
+        await message.answer(f"❌ Удалены уведомления для {safe_html(rbx_name)}")
 
 @dp.message(Command("ping"))
 async def ping_cmd(message: types.Message):
+    global status_chat_id, status_message_id
     try: await message.delete()
     except: pass
     
-    global status_chat_id, status_message_id
     if status_chat_id and status_message_id:
         try: await bot.delete_message(status_chat_id, status_message_id)
         except: pass
             
     status_chat_id = message.chat.id
-    msg = await bot.send_message(status_chat_id, "⏳ Инициализация таблицы...")
+    msg = await bot.send_message(status_chat_id, "⏳ Ожидание данных от Roblox...")
     status_message_id = msg.message_id
-    
     try:
         await bot.pin_chat_message(status_chat_id, status_message_id, disable_notification=True)
         await asyncio.sleep(1)
@@ -125,25 +108,22 @@ async def ping_cmd(message: types.Message):
     except: pass
 
 async def update_status_message():
-    global status_message_id, status_chat_id
     if not status_chat_id or not status_message_id: return
-        
     current_time = time.time()
-    text = f"<b>📊 Мониторинг Roblox</b>\nОбновлено: {time.strftime('%H:%M:%S')}\n\n"
     
-    for user in sorted(accounts.keys()):
-        is_online = current_time - accounts[user] < 90
-        
-        if user in last_status and last_status[user] == True and not is_online:
-            if user in notifications:
-                mentions = " ".join(notifications[user])
-                try:
-                    await bot.send_message(status_chat_id, f"⚠️ <b>{safe_html(user)}</b> ВЫЛЕТЕЛ! {mentions}", parse_mode="HTML")
-                except: pass
-        
-        last_status[user] = is_online
-        status_icon = "🟢" if is_online else "🔴"
-        text += f"{status_icon} <code>{safe_html(user)}</code>\n"
+    if not accounts:
+        text = "<b>📊 Мониторинг</b>\n⚠️ Нет данных. Запустите скрипт в Roblox."
+    else:
+        text = f"<b>📊 Мониторинг Roblox</b>\nОбновлено: {time.strftime('%H:%M:%S')}\n\n"
+        for user in sorted(accounts.keys()):
+            is_online = current_time - accounts[user] < 90
+            if user in last_status and last_status[user] and not is_online:
+                if user in notifications:
+                    mentions = " ".join(notifications[user])
+                    try: await bot.send_message(status_chat_id, f"⚠️ <b>{safe_html(user)}</b> вылетел! {mentions}", parse_mode="HTML")
+                    except: pass
+            last_status[user] = is_online
+            text += f"{'🟢' if is_online else '🔴'} <code>{safe_html(user)}</code>\n"
         
     try:
         await bot.edit_message_text(text, status_chat_id, status_message_id, parse_mode="HTML")
@@ -153,9 +133,12 @@ async def handle_signal(request):
     try:
         data = await request.json()
         if "username" in data:
-            accounts[data["username"]] = time.time()
+            user = data["username"]
+            accounts[user] = time.time()
+            print(f"📡 Сигнал получен: {user}") # Увидишь в логах Railway
             return web.Response(text="OK")
-    except: pass
+    except Exception as e:
+        print(f"⚠️ Ошибка в сигнале: {e}")
     return web.Response(text="Error", status=400)
 
 async def status_updater():
