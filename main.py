@@ -2,15 +2,27 @@ import requests
 import asyncio
 import json
 import os
+import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-TOKEN = os.getenv("TOKEN")
-CHECK_INTERVAL = 30  # Проверяем каждые 30 секунд
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)  
+
+TOKEN = os.getenv("TOKEN")  
+if not TOKEN:
+    logger.error("❌ Переменная окружения TOKEN не установлена!")
+    exit(1)
+
+CHECK_INTERVAL = 30  
 DATA_FILE = "players.json"
 
-tracked_players = {}  # {chat_id: {username: message_id}}
-player_status = {}  # {chat_id: {username: online_status}}
+tracked_players = {}  
+player_status = {}  
 
 def load_data():
     global tracked_players
@@ -18,14 +30,21 @@ def load_data():
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 tracked_players = json.load(f)
-        except:
-            tracked_players = {}
+            logger.info(f"✅ Данные загружены из {DATA_FILE}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при загрузке данных: {e}")
+            tracked_players = {}  
     else:
         tracked_players = {}
 
+
 def save_data():
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(tracked_players, f, ensure_ascii=False, indent=2)
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(tracked_players, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении данных: {e}")
+
 
 def is_player_online(username):
     """Получает статус игрока в Roblox"""
@@ -50,12 +69,13 @@ def is_player_online(username):
             return None
 
         status = presence["userPresences"][0]["userPresenceType"]
-        return status == 2  # 2 = в игре
+        return status == 2
     except Exception as e:
-        print(f"Ошибка при проверке {username}: {e}")
+        logger.debug(f"Ошибка при проверке {username}: {e}")
         return None
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     await update.message.reply_text(
         "Привет! 👋 Это бот для автоматических нотификаций о статусе аккаунтов Roblox.\n\n"
@@ -66,13 +86,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💡 Пример: /add MyNickname"
     )
 
-async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Добавить аккаунт для отслеживания"""
     if not context.args:
         await update.message.reply_text("❌ Используй: /add [Ник]")
         return
 
-    username = " ".join(context.args)  # Поддержка ников с пробелами
+    username = " ".join(context.args)
     chat_id = str(update.effective_chat.id)
 
     if chat_id not in tracked_players:
@@ -85,13 +106,11 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ {username} уже отслеживается!")
         return
 
-    # Проверяем, существует ли игрок
     online_status = is_player_online(username)
     if online_status is None:
         await update.message.reply_text(f"❌ Не удалось найти игрока: {username}")
         return
 
-    # Добавляем с начальным сообщением
     tracked_players[chat_id][username] = None
     player_status[chat_id][username] = online_status
     save_data()
@@ -103,11 +122,11 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Статус: {status_text}"
     )
     
-    # Сохраняем ID сообщения для редактирования
     tracked_players[chat_id][username] = msg.message_id
     save_data()
 
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Остановить отслеживание"""
     if not context.args:
         await update.message.reply_text("❌ Используй: /stop [Ник] или /stop all")
@@ -137,7 +156,8 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(f"❌ Аккаунт не найден: {username}")
 
-async def list_players(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+def list_players(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать список отслеживаемых аккаунтов"""
     chat_id = str(update.effective_chat.id)
 
@@ -153,10 +173,11 @@ async def list_players(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(message)
 
-async def check_players(app):
+
+def check_players(app):
     """Фоновая задача для проверки статусов"""
-    print("🔄 Запуск фонового мониторинга...")
-    await asyncio.sleep(5)  # Начальная задержка для инициализации
+    logger.info("🔄 Запуск фонового мониторинга...")
+    await asyncio.sleep(5)
     
     while True:
         try:
@@ -168,31 +189,26 @@ async def check_players(app):
                         if online is None:
                             continue
 
-                        # Инициализируем статус для чата если его нет
                         if chat_id not in player_status:
                             player_status[chat_id] = {}
 
                         last_status = player_status[chat_id].get(username, False)
 
-                        # Статус изменился
                         if online != last_status:
                             player_status[chat_id][username] = online
                             status_text = "🟢 зашел в игру!" if online else "🔴 вышел из игры!"
 
-                            # Получаем ID сохраненного сообщения
                             message_id = tracked_players[chat_id][username]
 
                             try:
                                 if message_id:
-                                    # Редактируем существующее сообщение
                                     await app.bot.edit_message_text(
                                         chat_id=int(chat_id),
                                         message_id=message_id,
-                                        text=f"👤 {username}\n{status_text}\n\n⏰ Обновлено: <code>{'🔴' if not online else '🟢'}</code>",
+                                        text=f"👤 {username}\n{status_text}",
                                         parse_mode="HTML"
                                     )
                                 else:
-                                    # Отправляем новое сообщение
                                     msg = await app.bot.send_message(
                                         int(chat_id),
                                         f"👤 {username}\n{status_text}",
@@ -201,44 +217,46 @@ async def check_players(app):
                                     tracked_players[chat_id][username] = msg.message_id
                                     save_data()
                             except Exception as e:
-                                print(f"Ошибка при отправке сообщения: {e}")
-                                # Отправляем новое сообщение если редактирование не прошло
+                                logger.error(f"Ошибка при отправке сообщения: {e}")
                                 try:
                                     msg = await app.bot.send_message(
                                         int(chat_id),
-                                        f"👤 {username}\n{status_text}\n\n⏰ Ошибка редактирования сообщения"
+                                        f"👤 {username}\n{status_text}"
                                     )
                                     tracked_players[chat_id][username] = msg.message_id
                                     save_data()
                                 except Exception as e2:
-                                    print(f"Ошибка при отправке нового сообщения: {e2}")
+                                    logger.error(f"Ошибка при отправке нового сообщения: {e2}")
 
                     except Exception as e:
-                        print(f"Ошибка при проверке {username}: {e}")
+                        logger.error(f"Ошибка при проверке {username}: {e}")
                         continue
 
             await asyncio.sleep(CHECK_INTERVAL)
         except Exception as e:
-            print(f"Ошибка в check_players: {e}")
+            logger.error(f"Ошибка в check_players: {e}")
             await asyncio.sleep(CHECK_INTERVAL)
 
-async def main():
+
+def main():
     """Главная функция"""
+    logger.info("🚀 Запуск бота...")
     load_data()
 
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Обработчики команд
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add))
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("list", list_players))
 
-    # Запускаем фоновую задачу
     asyncio.create_task(check_players(app))
 
-    print("✅ Бот запущен!")
-    await app.run_polling()
+    logger.info("✅ Бот готов!")
+    await app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("⛔ Бот остановлен")
