@@ -6,7 +6,6 @@ import redis.asyncio as redis
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandObject
 from aiohttp import web
-from aiogram.utils.html import quote
 
 TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
@@ -18,9 +17,13 @@ db = None
 
 accounts = {}      
 last_status = {}   
-notifications = {} # { "rbx_nick": ["mention1", "mention2"] }
+notifications = {} 
 status_chat_id = None
 status_message_id = None
+
+# Ручная очистка текста для HTML, чтобы не зависеть от версий aiogram
+def safe_html(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 async def init_db():
     global db, notifications
@@ -50,7 +53,7 @@ async def list_notifications(message: types.Message):
     text = "<b>🔔 Список уведомлений:</b>\n\n"
     for rbx, users in notifications.items():
         mentions = ", ".join(users)
-        text += f"• <code>{quote(rbx)}</code> — {mentions}\n"
+        text += f"• <code>{safe_html(rbx)}</code> — {mentions}\n"
     await message.answer(text, parse_mode="HTML")
 
 @dp.message(Command("add"))
@@ -62,17 +65,14 @@ async def add_notify(message: types.Message, command: CommandObject):
     rbx_name = args[0]
     mention = None
 
-    # 1. Проверяем, есть ли упоминание в тексте
     if len(args) > 1:
         mention = args[1]
-    # 2. Проверяем, если это ответ на сообщение
     elif message.reply_to_message:
         user = message.reply_to_message.from_user
-        mention = f"@{user.username}" if user.username else user.mention_html(user.full_name)
-    # 3. Иначе пингуем автора команды
+        mention = f"@{user.username}" if user.username else f"<a href='tg://user?id={user.id}'>{safe_html(user.full_name)}</a>"
     else:
         user = message.from_user
-        mention = f"@{user.username}" if user.username else user.mention_html(user.full_name)
+        mention = f"@{user.username}" if user.username else f"<a href='tg://user?id={user.id}'>{safe_html(user.full_name)}</a>"
 
     if rbx_name not in notifications:
         notifications[rbx_name] = []
@@ -80,7 +80,7 @@ async def add_notify(message: types.Message, command: CommandObject):
     if mention not in notifications[rbx_name]:
         notifications[rbx_name].append(mention)
         await save_to_db()
-        await message.answer(f"✅ Добавлен пинг для <code>{quote(rbx_name)}</code> юзеру {mention}", parse_mode="HTML")
+        await message.answer(f"✅ Добавлен пинг для <code>{safe_html(rbx_name)}</code> юзеру {mention}", parse_mode="HTML")
     else:
         await message.answer("Этот юзер уже подписан на этот аккаунт.")
 
@@ -93,7 +93,7 @@ async def remove_notify(message: types.Message, command: CommandObject):
     if rbx_name in notifications:
         del notifications[rbx_name]
         await save_to_db()
-        await message.answer(f"❌ Все уведомления для <code>{quote(rbx_name)}</code> удалены.", parse_mode="HTML")
+        await message.answer(f"❌ Все уведомления для <code>{safe_html(rbx_name)}</code> удалены.", parse_mode="HTML")
     else:
         await message.answer("Ник не найден.")
 
@@ -138,12 +138,12 @@ async def update_status_message():
             if user in notifications:
                 mentions = " ".join(notifications[user])
                 try:
-                    await bot.send_message(status_chat_id, f"⚠️ <b>{quote(user)}</b> ВЫЛЕТЕЛ! {mentions}", parse_mode="HTML")
+                    await bot.send_message(status_chat_id, f"⚠️ <b>{safe_html(user)}</b> ВЫЛЕТЕЛ! {mentions}", parse_mode="HTML")
                 except: pass
         
         last_status[user] = is_online
         status_icon = "🟢" if is_online else "🔴"
-        text += f"{status_icon} <code>{quote(user)}</code>\n"
+        text += f"{status_icon} <code>{safe_html(user)}</code>\n"
         
     try:
         await bot.edit_message_text(text, status_chat_id, status_message_id, parse_mode="HTML")
