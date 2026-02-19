@@ -2,10 +2,13 @@ import os
 import asyncio
 import time
 import json
+import io
 import redis.asyncio as redis
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandObject
+from aiogram.types import BufferedInputFile
 from aiohttp import web
+from PIL import Image, ImageDraw, ImageFont
 
 # --- Конфигурация ---
 TOKEN = os.getenv("BOT_TOKEN")
@@ -69,60 +72,72 @@ async def save_to_db():
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
-    welcome = (
-        "<b>🤖 Мониторинг запущен!</b>\n\n"
-        "• /ping — Создать таблицу\n"
-        "• /add Ник — Добавить уведомление\n"
-        "• /list — Показать настройки и паузы\n"
-        "• /disable [Ник/all] — Выключить пинги\n"
-        "• /enable [all] — Включить пинги\n"
-        "• /remove [Ник] — Удалить пинг"
+    guide = (
+        "<b>🚀 Инструкция по управлению мониторингом</b>\n\n"
+        "<b>1. Настройка уведомлений:</b>\n"
+        "• <code>/add Ник</code> — подписаться на уведомления о вылете аккаунта.\n"
+        "• <code>/add Ник @user</code> — подписать другого человека.\n"
+        "• <code>/remove Ник</code> — перестать получать уведомления для этого ника.\n\n"
+        "<b>2. Управление таблицей:</b>\n"
+        "• <code>/ping</code> — создать новую таблицу. Старая таблица удалится, а новая закрепится в чате автоматически.\n"
+        "• <code>/img_create</code> — сгенерировать картинку с текущим состоянием всех аккаунтов.\n\n"
+        "<b>3. Режим паузы (Мут):</b>\n"
+        "• <code>/disable</code> — выключить все уведомления для ВАС (в списке появится 🔇).\n"
+        "• <code>/disable Ник</code> — выключить уведомления только для конкретного аккаунта.\n"
+        "• <code>/disable all</code> — поставить весь бот на паузу (уведомления не придут никому).\n"
+        "• <code>/enable</code> — включить ваши уведомления обратно.\n\n"
+        "<b>4. Просмотр данных:</b>\n"
+        "• <code>/list</code> — посмотреть, кто на какие аккаунты подписан и у кого выключен звук."
     )
-    await message.answer(welcome, parse_mode="HTML")
-
-@dp.message(Command("add"))
-async def add_notify(message: types.Message, command: CommandObject):
-    args = command.args.split() if command.args else []
-    if not args: return await message.answer("Использование: /add Ник")
-    
-    rbx_name = args[0]
-    mentions = args[1:] if len(args) > 1 else [get_user_id(message)]
-    
-    if rbx_name not in notifications: notifications[rbx_name] = []
-    added = 0
-    for m in mentions:
-        if m not in notifications[rbx_name]:
-            notifications[rbx_name].append(m)
-            added += 1
-    if added: await save_to_db()
-    await message.answer(f"✅ Добавлено ({added}) для <code>{safe_html(rbx_name)}</code>", parse_mode="HTML")
+    await message.answer(guide, parse_mode="HTML")
 
 @dp.message(Command("list"))
 async def list_notifications(message: types.Message):
     if not notifications: return await message.answer("Список пуст.")
-    
     header = "<b>🔔 Настройки пингов:</b>"
     if global_disable: header += " ⚠️ (ГЛОБАЛЬНАЯ ПАУЗА)"
-    
     text = f"{header}\n\n"
     for rbx, users in notifications.items():
         if not users: continue
         fmt_users = []
         for u in users:
-            muted = False
+            is_muted = False
+            u_clean = u.lower().strip()
             for d_uid, d_st in disabled_users.items():
-                if d_uid in u and (d_st == "all" or rbx in d_st):
-                    muted = True; break
-            fmt_users.append(f"{u}{' 🔇' if muted else ''}")
+                if d_uid.lower() in u_clean:
+                    if d_st == "all" or rbx in d_st:
+                        is_muted = True; break
+            fmt_users.append(f"{u}{' 🔇' if is_muted else ''}")
         text += f"• <code>{safe_html(rbx)}</code>: {', '.join(fmt_users)}\n"
     await message.answer(text, parse_mode="HTML")
+
+@dp.message(Command("Img_Create"))
+async def create_image_status(message: types.Message):
+    if not accounts: return await message.answer("Нет данных.")
+    width, height = 600, 100 + (len(accounts) * 40)
+    img = Image.new('RGB', (width, height), color=(30, 30, 30))
+    draw = ImageDraw.Draw(img)
+    draw.text((20, 20), f"Roblox Status - {time.strftime('%H:%M:%S')}", fill=(255, 255, 255))
+    draw.line((20, 50, 580, 50), fill=(100, 100, 100))
+    y, now = 70, time.time()
+    for user in sorted(accounts.keys()):
+        is_online = now - accounts[user] < 120
+        color = (0, 255, 0) if is_online else (255, 0, 0)
+        draw.ellipse((20, y, 35, y+15), fill=color)
+        session = f"({format_duration(now - start_times[user])})" if is_online and user in start_times else ""
+        draw.text((50, y), f"{user} {session}", fill=(255, 255, 255))
+        draw.text((450, y), "ONLINE" if is_online else "OFFLINE", fill=color)
+        y += 40
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    await message.answer_photo(BufferedInputFile(buf.read(), filename="status.png"), caption="📊 Текущий отчет")
 
 @dp.message(Command("disable"))
 async def disable_cmd(message: types.Message, command: CommandObject):
     global global_disable
     uid = get_user_id(message)
     arg = command.args.strip() if command.args else None
-    
     if arg == "all":
         global_disable = True
         await message.answer("⚠️ Пинги отключены для ВСЕХ.")
@@ -148,18 +163,30 @@ async def enable_cmd(message: types.Message, command: CommandObject):
         await message.answer("🔊 Ваши пинги снова включены.")
     await save_to_db()
 
+@dp.message(Command("add"))
+async def add_notify(message: types.Message, command: CommandObject):
+    args = command.args.split() if command.args else []
+    if not args: return await message.answer("Использование: /add Ник")
+    rbx_name = args[0]
+    mentions = args[1:] if len(args) > 1 else [get_user_id(message)]
+    if rbx_name not in notifications: notifications[rbx_name] = []
+    for m in mentions:
+        if m not in notifications[rbx_name]: notifications[rbx_name].append(m)
+    await save_to_db()
+    await message.answer(f"✅ Список пингов обновлен для <code>{safe_html(rbx_name)}</code>", parse_mode="HTML")
+
 @dp.message(Command("remove"))
 async def remove_cmd(message: types.Message, command: CommandObject):
-    uid = get_user_id(message)
+    uid = get_user_id(message).lower()
     args = command.args.split() if command.args else []
     if not args:
         for rbx in notifications:
-            notifications[rbx] = [m for m in notifications[rbx] if uid not in m]
+            notifications[rbx] = [m for m in notifications[rbx] if uid not in m.lower()]
         await message.answer("🗑 Вы удалены из всех списков.")
     else:
         rbx_name = args[0]
         if rbx_name in notifications:
-            notifications[rbx_name] = [m for m in notifications[rbx_name] if uid not in m]
+            notifications[rbx_name] = [m for m in notifications[rbx_name] if uid not in m.lower()]
             await message.answer(f"✅ Пинг удален для {rbx_name}")
     await save_to_db()
 
@@ -181,12 +208,9 @@ async def ping_cmd(message: types.Message):
         await bot.delete_message(chat_id=str(status_chat_id), message_id=status_message_id + 1)
     except: pass
 
-# --- Логика статусов ---
-
 async def update_status_message():
     if not status_chat_id or not status_message_id: return
     now = time.time()
-    
     if not accounts:
         text = "<b>📊 Мониторинг</b>\n⚠️ Ждем сигналов..."
     else:
@@ -199,9 +223,9 @@ async def update_status_message():
                 if user in notifications and not global_disable:
                     active = []
                     for m in notifications[user]:
-                        muted = False
+                        muted, m_low = False, m.lower()
                         for d_uid, d_st in disabled_users.items():
-                            if d_uid in m and (d_st == "all" or user in d_st):
+                            if d_uid.lower() in m_low and (d_st == "all" or user in d_st):
                                 muted = True; break
                         if not muted: active.append(m)
                     if active:
@@ -213,9 +237,7 @@ async def update_status_message():
                 if user not in start_times: start_times[user] = now
                 text += f"🟢 <code>{safe_html(user)}</code> | ⏱ {format_duration(now - start_times[user])}\n"
             else: text += f"🔴 <code>{safe_html(user)}</code>\n"
-    
-    try:
-        await bot.edit_message_text(text=text, chat_id=str(status_chat_id), message_id=status_message_id, parse_mode="HTML")
+    try: await bot.edit_message_text(text=text, chat_id=str(status_chat_id), message_id=status_message_id, parse_mode="HTML")
     except: pass
 
 async def handle_signal(request):
@@ -223,7 +245,7 @@ async def handle_signal(request):
         data = await request.json()
         if "username" in data:
             user = data["username"]
-            accounts[user] = time.time()
+            accounts[user], last_status[user] = time.time(), True
             if user not in start_times: start_times[user] = time.time()
             return web.Response(text="OK")
     except: pass
@@ -231,8 +253,7 @@ async def handle_signal(request):
 
 async def main():
     await init_db()
-    app = web.Application()
-    app.router.add_post('/signal', handle_signal)
+    app = web.Application(); app.router.add_post('/signal', handle_signal)
     runner = web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', PORT).start()
     asyncio.create_task(status_updater())
