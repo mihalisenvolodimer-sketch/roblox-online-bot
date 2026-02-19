@@ -29,22 +29,34 @@ async def init_db():
     if REDIS_URL:
         try:
             db = redis.from_url(REDIS_URL, decode_responses=True)
-            data = await db.get("roblox_notifications")
-            if data:
-                notifications.update(json.loads(data))
-            print(f"✅ Redis Loaded. Records: {len(notifications)}")
+            # Пытаемся загрузить данные
+            raw_data = await db.get("roblox_notifications")
+            if raw_data:
+                loaded = json.loads(raw_data)
+                notifications.update(loaded)
+                print(f"✅ Данные загружены из Redis: {len(notifications)} аккаунтов")
+            else:
+                print("ℹ️ Redis пуст, создаем новую базу")
         except Exception as e:
-            print(f"❌ Redis Error: {e}")
+            print(f"❌ Ошибка Redis при старте: {e}")
+    else:
+        print("⚠️ REDIS_URL не найден в переменных окружения!")
 
 async def save_to_db():
     if db:
-        try: await db.set("roblox_notifications", json.dumps(notifications))
-        except: pass
+        try:
+            # Сохраняем текущий словарь уведомлений в Redis
+            await db.set("roblox_notifications", json.dumps(notifications))
+            print(f"💾 Список сохранен в Redis ({len(notifications)} записей)")
+        except Exception as e:
+            print(f"❌ Ошибка сохранения в Redis: {e}")
 
 @dp.message(Command("list"))
 async def list_notifications(message: types.Message):
-    if not notifications: return await message.answer("Список пуст.")
-    text = "<b>🔔 Настройки пингов:</b>\n"
+    if not notifications:
+        return await message.answer("Список пингов пуст. Добавьте через /add")
+    
+    text = "<b>🔔 Настроенные уведомления:</b>\n\n"
     for rbx, users in notifications.items():
         text += f"• <code>{safe_html(rbx)}</code>: {', '.join(users)}\n"
     await message.answer(text, parse_mode="HTML")
@@ -52,21 +64,43 @@ async def list_notifications(message: types.Message):
 @dp.message(Command("add"))
 async def add_notify(message: types.Message, command: CommandObject):
     args = command.args.split() if command.args else []
-    if not args: return await message.answer("Использование: /add Nick")
-    rbx_name, mention = args[0], ""
-    if len(args) > 1: mention = args[1]
+    if not args:
+        return await message.answer("Использование: <code>/add Ник</code>", parse_mode="HTML")
+    
+    rbx_name = args[0]
+    mention = None
+
+    if len(args) > 1:
+        mention = args[1]
     elif message.reply_to_message:
         u = message.reply_to_message.from_user
         mention = f"@{u.username}" if u.username else f"<a href='tg://user?id={u.id}'>{safe_html(u.full_name)}</a>"
     else:
         u = message.from_user
         mention = f"@{u.username}" if u.username else f"<a href='tg://user?id={u.id}'>{safe_html(u.full_name)}</a>"
+
+    if rbx_name not in notifications:
+        notifications[rbx_name] = []
     
-    if rbx_name not in notifications: notifications[rbx_name] = []
     if mention not in notifications[rbx_name]:
         notifications[rbx_name].append(mention)
+        await save_to_db() # Сохраняем сразу после добавления
+        await message.answer(f"✅ Пинг {mention} для <code>{safe_html(rbx_name)}</code> сохранен.", parse_mode="HTML")
+    else:
+        await message.answer("Этот пользователь уже в списке для этого аккаунта.")
+
+@dp.message(Command("remove"))
+async def remove_notify(message: types.Message, command: CommandObject):
+    if not command.args:
+        return await message.answer("Укажите ник.")
+    
+    rbx_name = command.args.strip()
+    if rbx_name in notifications:
+        del notifications[rbx_name]
         await save_to_db()
-    await message.answer(f"✅ Пинг {mention} для {safe_html(rbx_name)} активен.", parse_mode="HTML")
+        await message.answer(f"❌ Пинги для <code>{safe_html(rbx_name)}</code> удалены.", parse_mode="HTML")
+    else:
+        await message.answer("Ник не найден.")
 
 @dp.message(Command("ping"))
 async def ping_cmd(message: types.Message):
@@ -79,7 +113,7 @@ async def ping_cmd(message: types.Message):
         except: pass
             
     status_chat_id = message.chat.id
-    msg = await bot.send_message(chat_id=str(status_chat_id), text="⏳ Сбор данных...")
+    msg = await bot.send_message(chat_id=str(status_chat_id), text="⏳ Ожидание данных...")
     status_message_id = msg.message_id
     
     try:
@@ -108,7 +142,6 @@ async def update_status_message():
             text += f"{'🟢' if is_online else '🔴'} <code>{safe_html(user)}</code>\n"
     
     try:
-        # Ключевое исправление: передаем chat_id как str()
         await bot.edit_message_text(
             text=text, 
             chat_id=str(status_chat_id), 
@@ -117,7 +150,7 @@ async def update_status_message():
         )
     except Exception as e:
         if "message is not modified" not in str(e):
-            print(f"❌ Ошибочка обновления: {e}")
+            print(f"❌ Ошибка обновления: {e}")
 
 async def handle_signal(request):
     try:
@@ -145,7 +178,7 @@ async def main():
     
     asyncio.create_task(status_updater())
     
-    print("🚀 Бот запущен (FIX: ChatID as string)")
+    print("🚀 Бот запущен (Final Fix)")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
