@@ -10,7 +10,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile
 from aiohttp import web
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 
 # --- Конфигурация ---
 TOKEN = os.getenv("BOT_TOKEN")
@@ -32,13 +32,12 @@ avatar_cache = {}
 status_chat_id = None
 status_message_id = None
 
-# Цвета для случайных фонов (Bee Swarm Style)
-BSS_BACKGROUNDS = [
-    (255, 193, 7),  # Honey Yellow
-    (76, 175, 80),  # Clover Green
-    (255, 87, 34),  # Sun-Orange
-    (33, 150, 243), # Blue Flower
-    (156, 39, 176)  # Gummy Purple
+# Ссылки на фоны Bee Swarm Simulator
+BSS_BG_URLS = [
+    "https://tr.rbxcdn.com/71231f2479e000418c39d962659e9c70/768/432/Image/Png",
+    "https://tr.rbxcdn.com/18117769534661705608/768/432/Image/Png",
+    "https://i.ytimg.com/vi/6f5SleB_9uM/maxresdefault.jpg",
+    "https://tr.rbxcdn.com/5650117079/768/432/Image/Png"
 ]
 
 # --- Утилиты ---
@@ -58,6 +57,15 @@ def format_duration(seconds):
 def get_user_id(message: types.Message):
     u = message.from_user
     return f"@{u.username}" if u.username else f"ID:{u.id}"
+
+async def get_image_from_url(url):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    return Image.open(io.BytesIO(data)).convert("RGBA")
+    except: return None
 
 async def get_roblox_avatar(username):
     if username in avatar_cache: return avatar_cache[username]
@@ -105,87 +113,83 @@ async def save_to_db():
 @dp.message(Command("ping"))
 async def ping_cmd(message: types.Message):
     global status_chat_id, status_message_id
-    
-    # 1. Пытаемся удалить сообщение пользователя
     try: await message.delete()
     except: pass
-
-    # 2. Ищем и удаляем предыдущий закреп бота
     try:
         chat = await bot.get_chat(message.chat.id)
         if chat.pinned_message and chat.pinned_message.from_user.id == bot.id:
             await bot.delete_message(message.chat.id, chat.pinned_message.message_id)
     except: pass
-
     status_chat_id = message.chat.id
-    msg = await bot.send_message(chat_id=str(status_chat_id), text="⏳ Запуск мониторинга BSS...")
+    msg = await bot.send_message(chat_id=str(status_chat_id), text="⏳ Запуск мониторинга пасеки...")
     status_message_id = msg.message_id
-    
-    # 3. Закрепляем новое сообщение (системное сообщение ТГ об этом НЕ удаляем по просьбе)
-    try:
-        await bot.pin_chat_message(chat_id=str(status_chat_id), message_id=status_message_id, disable_notification=True)
+    try: await bot.pin_chat_message(chat_id=str(status_chat_id), message_id=status_message_id, disable_notification=True)
     except: pass
 
 @dp.message(Command("img_create"))
 async def img_create_cmd(message: types.Message):
     if not accounts: return await message.answer("Нет данных.")
-    wait = await message.answer("🍯 Собираю пыльцу и рисую отчет...")
+    wait = await message.answer("🖼 Загружаю BSS фон и рисую...")
     try:
-        # Выбираем случайный яркий цвет фона
-        bg_main = random.choice(BSS_BACKGROUNDS)
-        dark_bg = (int(bg_main[0]*0.2), int(bg_main[1]*0.2), int(bg_main[2]*0.2)) # Темный вариант для текста
-        
         width, height = 700, 150 + (len(accounts) * 65)
-        img = Image.new('RGB', (width, height), color=dark_bg)
-        draw = ImageDraw.Draw(img)
         
+        # Загружаем случайный фон
+        bg_url = random.choice(BSS_BG_URLS)
+        bg_img = await get_image_from_url(bg_url)
+        
+        if bg_img:
+            # Масштабируем фон под размер отчета
+            bg_img = bg_img.resize((width, height), Image.LANCZOS)
+            # Немного затемняем, чтобы текст читался
+            enhancer = ImageEnhance.Brightness(bg_img)
+            bg_img = enhancer.enhance(0.4) 
+        else:
+            bg_img = Image.new('RGBA', (width, height), color=(20, 20, 20, 255))
+
+        draw = ImageDraw.Draw(bg_img)
         try: font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
         except: font = ImageFont.load_default()
 
-        # Рисуем заголовок на фоне основного цвета
-        draw.rectangle([0, 0, width, 90], fill=bg_main)
-        draw.text((40, 30), f"BEE SWARM MONITOR | {time.strftime('%H:%M:%S')}", fill=(255, 255, 255), font=font)
+        # Заголовок
+        draw.text((40, 30), f"BEE SWARM STATUS | {time.strftime('%H:%M:%S')}", fill=(255, 215, 0), font=font)
+        draw.line((40, 80, 660, 80), fill=(255, 215, 0, 100), width=2)
 
         y, now = 110, time.time()
         for user in sorted(accounts.keys()):
             online = now - accounts[user] < 120
-            # Плашка: ярко-зеленая если онлайн, тусклая если оффлайн
-            row_bg = (46, 125, 50) if online else (60, 60, 60)
-            draw.rounded_rectangle([40, y, 660, y+55], radius=12, fill=row_bg)
+            # Полупрозрачная плашка
+            row_color = (0, 150, 0, 160) if online else (60, 60, 60, 160)
+            draw.rounded_rectangle([40, y, 660, y+55], radius=10, fill=row_color)
 
             avatar = await get_roblox_avatar(user)
             if avatar:
                 avatar = avatar.resize((45, 45), Image.LANCZOS)
-                img.paste(avatar, (50, y+5), avatar)
+                bg_img.paste(avatar, (50, y+5), avatar if avatar.mode == 'RGBA' else None)
             else:
-                draw.ellipse((50, y+10, 95, y+45), fill=bg_main)
+                draw.ellipse((50, y+10, 95, y+45), fill=(255, 215, 0))
 
             draw.text((110, y+15), user, fill=(255, 255, 255), font=font)
             dur = format_duration(now - start_times.get(user, now)) if online else "Offline"
             draw.text((420, y+15), f"Time: {dur}", fill=(255, 255, 255), font=font)
             y += 65
 
-        buf = io.BytesIO(); img.save(buf, format='PNG'); buf.seek(0)
+        # Конвертируем в RGB для сохранения в PNG/JPG
+        final_img = bg_img.convert("RGB")
+        buf = io.BytesIO(); final_img.save(buf, format='PNG'); buf.seek(0)
+        
         await wait.delete()
-        await message.answer_photo(BufferedInputFile(buf.read(), filename="bss_report.png"), caption="🐝 Текущий статус пасеки")
-    except Exception as e: await message.answer(f"Ошибка: {e}")
+        await message.answer_photo(BufferedInputFile(buf.read(), filename="bss_report.png"), caption="🐝 Статус пчеловодов готов!")
+    except Exception as e: await message.answer(f"Ошибка отрисовки: {e}")
 
 @dp.message(Command("list"))
 async def list_cmd(message: types.Message):
     if not notifications: return await message.answer("Список пуст.")
-    header = "<b>🔔 Настройки пингов:</b>"
-    if global_disable: header += " ⚠️ (ПАУЗА)"
-    text = f"{header}\n\n"
+    text = "<b>🔔 Настройки пингов:</b>\n\n"
     for rbx, users in notifications.items():
         if not users: continue
         fmt = []
         for u in users:
-            is_muted = False
-            u_l = u.lower().strip()
-            for d_uid, d_st in disabled_users.items():
-                d_l = d_uid.lower().strip()
-                if (d_l in u_l or u_l in d_l) and (d_st == "all" or rbx in d_st):
-                    is_muted = True; break
+            is_muted = any(d_l in u.lower() and (d_st == "all" or rbx in d_st) for d_l, d_st in disabled_users.items())
             fmt.append(f"{u}{' 🔇' if is_muted else ''}")
         text += f"• <code>{safe_html(rbx)}</code>: {', '.join(fmt)}\n"
     await message.answer(text, parse_mode="HTML")
@@ -214,18 +218,16 @@ async def remove_cmd(message: types.Message, command: CommandObject):
 async def add_cmd(message: types.Message, command: CommandObject):
     args = command.args.split() if command.args else []
     if not args: return await message.answer("Использование: /add Ник @юзер")
-    rbx = args[0]
-    mints = args[1:] if len(args) > 1 else [get_user_id(message)]
+    rbx, mints = args[0], args[1:] if len(args) > 1 else [get_user_id(message)]
     if rbx not in notifications: notifications[rbx] = []
     for m in mints:
         if m not in notifications[rbx]: notifications[rbx].append(m)
-    await save_to_db(); await message.answer(f"✅ Добавлено для <code>{rbx}</code>")
+    await save_to_db(); await message.answer(f"✅ Обновлено для <code>{rbx}</code>")
 
 @dp.message(Command("disable"))
 async def disable_cmd(message: types.Message, command: CommandObject):
     global global_disable
-    uid = get_user_id(message)
-    arg = command.args.strip() if command.args else None
+    uid, arg = get_user_id(message), command.args.strip() if command.args else None
     if arg == "all": global_disable = True
     elif not arg: disabled_users[uid] = "all"
     else:
@@ -240,14 +242,12 @@ async def enable_cmd(message: types.Message):
     disabled_users.pop(uid, None)
     await save_to_db(); await message.answer("🔊 Звук включен.")
 
-# --- Основной цикл ---
-
 async def update_status_message():
     if not status_chat_id or not status_message_id: return
     now = time.time()
-    if not accounts: text = "<b>📊 Мониторинг</b>\nЖдем сигналов..."
+    if not accounts: text = "<b>📊 Мониторинг</b>\nОжидание..."
     else:
-        text = f"<b>📊 BSS Мониторинг</b>\n🕒 {time.strftime('%H:%M:%S')}{' ❗PAUSE' if global_disable else ''}\n\n"
+        text = f"<b>📊 BSS Мониторинг</b>\n🕒 {time.strftime('%H:%M:%S')}\n\n"
         for user in sorted(accounts.keys()):
             online = now - accounts[user] < 120
             if user in last_status and last_status[user] and not online:
