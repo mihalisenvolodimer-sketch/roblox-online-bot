@@ -26,28 +26,31 @@ last_text = {}
 def logger(msg):
     print(f"DEBUG [{time.strftime('%H:%M:%S')}]: {msg}")
 
-# --- База Данных ---
+# --- Умная База Данных ---
 async def load_data():
     global db, notifications, status_messages
-    if not REDIS_URL: return
+    if not REDIS_URL:
+        logger("⚠️ REDIS_URL не найден!")
+        return
     try:
         db = redis.from_url(REDIS_URL, decode_responses=True)
-        raw = await db.get("BSS_V34_STABLE")
+        raw = await db.get("BSS_V35_AUTOSTART")
         if raw:
             data = json.loads(raw)
             notifications.update(data.get("notifs", {}))
             status_messages.update(data.get("msgs", {}))
-            logger("Данные успешно загружены из Redis")
+            logger(f"✅ Улей восстановлен! Чатов в работе: {len(status_messages)}")
+            # После загрузки сразу пробуем обновить панели
+            asyncio.create_task(refresh_panels())
     except Exception as e:
-        logger(f"Ошибка БД при загрузке: {e}")
+        logger(f"❌ Ошибка восстановления: {e}")
 
 async def save_data():
     if not db: return
     try:
         data = {"notifs": notifications, "msgs": status_messages}
-        await db.set("BSS_V34_STABLE", json.dumps(data))
-    except Exception as e:
-        logger(f"Ошибка БД при сохранении: {e}")
+        await db.set("BSS_V35_AUTOSTART", json.dumps(data))
+    except: pass
 
 # --- Логика текста ---
 def get_status_text():
@@ -78,119 +81,59 @@ async def refresh_panels():
             last_text[str(cid)] = text
         except Exception as e:
             if "message is not modified" not in str(e).lower():
-                logger(f"Ошибка обновления панели в {cid}: {e}")
+                logger(f"Ошибка обновления {cid}: {e}")
+                if "message to edit not found" in str(e).lower():
+                    # Если сообщение удалено вручную, забываем о нем
+                    status_messages.pop(cid, None)
 
-# --- Обработка команд ---
-
-@dp.message(Command("start", ignore_case=True))
-async def cmd_start(m: types.Message):
-    logger(f"Пользователь {m.from_user.id} нажал /start")
-    welcome_text = (
-        "<b>🐝 Бот Улья приветствует тебя!</b>\n\n"
-        "📜 <b>Команды:</b>\n"
-        "/information — Создать панель мониторинга\n"
-        "/add [Ник] — Подписаться на уведомления о вылете\n"
-        "/delete [Ник] — Удалить подписку на ник\n"
-        "/list — Показать все активные подписки"
-    )
-    await m.answer(welcome_text, parse_mode="HTML")
+# --- Команды ---
 
 @dp.message(Command("information", ignore_case=True))
 async def cmd_info(m: types.Message):
     cid_str = str(m.chat.id)
-    logger(f"Запрос панели /information в чате {cid_str}")
-    
     if cid_str in status_messages:
-        try:
-            await bot.delete_message(chat_id=cid_str, message_id=status_messages[cid_str])
-            logger(f"Старая панель в {cid_str} удалена")
+        try: await bot.delete_message(chat_id=cid_str, message_id=status_messages[cid_str])
         except: pass
 
     msg = await m.answer(get_status_text(), parse_mode="HTML")
     status_messages[cid_str] = msg.message_id
-    
     try:
         await bot.pin_chat_message(chat_id=cid_str, message_id=msg.message_id, disable_notification=True)
         await asyncio.sleep(1)
         await bot.delete_message(chat_id=cid_str, message_id=msg.message_id + 1)
-    except Exception as e:
-        logger(f"Ошибка закрепа в {cid_str}: {e}")
-    
+    except: pass
     await save_data()
 
 @dp.message(Command("add", ignore_case=True))
 async def cmd_add(m: types.Message):
     args = m.text.split()
-    if len(args) < 2:
-        return await m.answer("⚠️ Пиши ник: <code>/add PlayerName</code>", parse_mode="HTML")
-    
+    if len(args) < 2: return
     acc = args[1]
     tag = f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}"
-    
-    if acc not in notifications:
-        notifications[acc] = []
-    
-    if tag not in notifications[acc]:
-        notifications[acc].append(tag)
-        logger(f"Добавлен пинг: {acc} -> {tag}")
-        await save_data()
-        await m.answer(f"✅ Пинг для <b>{acc}</b> добавлен пользователю {tag}", parse_mode="HTML")
-    else:
-        await m.answer(f"ℹ️ Ты уже подписан на {acc}")
+    notifications.setdefault(acc, []).append(tag)
+    await save_data()
+    await m.answer(f"✅ Пинг для {acc} добавлен")
 
-@dp.message(Command("delete", ignore_case=True))
-async def cmd_delete(m: types.Message):
-    args = m.text.split()
-    if len(args) < 2:
-        return await m.answer("⚠️ Пиши ник: <code>/delete PlayerName</code>", parse_mode="HTML")
-    
-    acc = args[1]
-    tag = f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}"
-    
-    if acc in notifications and tag in notifications[acc]:
-        notifications[acc].remove(tag)
-        if not notifications[acc]: # Если подписчиков больше нет, удаляем ник совсем
-            del notifications[acc]
-        logger(f"Удален пинг: {acc} -> {tag}")
-        await save_data()
-        await m.answer(f"❌ Пинг для <b>{acc}</b> удален.", parse_mode="HTML")
-    else:
-        await m.answer(f"❓ Ты не подписан на <b>{acc}</b>", parse_mode="HTML")
-
-@dp.message(Command("list", ignore_case=True))
-async def cmd_list(m: types.Message):
-    logger(f"Запрос списка подписок в чате {m.chat.id}")
-    if not notifications:
-        return await m.answer("Список подписок пуст.")
-    
-    res = "<b>📜 Активные уведомления:</b>\n"
-    for acc, tags in notifications.items():
-        res += f"• <code>{acc}</code>: {', '.join(tags)}\n"
-    await m.answer(res, parse_mode="HTML")
-
-# --- Сервер сигналов и Мониторинг ---
+# --- Сервер и Мониторинг ---
 
 async def handle_signal(request):
     try:
         data = await request.json()
         u = data.get("username")
         if u:
-            if u not in accounts:
-                start_times[u] = time.time()
-                logger(f"Аккаунт {u} ПОДКЛЮЧИЛСЯ")
+            if u not in accounts: start_times[u] = time.time()
             accounts[u] = time.time()
             asyncio.create_task(refresh_panels())
             return web.Response(text="OK")
-    except Exception as e:
-        logger(f"Ошибка сигнала: {e}")
+    except: pass
     return web.Response(status=400)
 
 async def monitor():
     while True:
         now = time.time()
         for u in list(accounts.keys()):
-            if now - accounts[u] > 180: # 3 минуты тишины
-                logger(f"Аккаунт {u} ВЫЛЕТЕЛ (нет сигнала)")
+            if now - accounts[u] > 180:
+                logger(f"Вылет: {u}")
                 if u in notifications:
                     for cid in status_messages:
                         try: 
@@ -199,16 +142,14 @@ async def monitor():
                                 text=f"🚨 <b>{u}</b> ВЫЛЕТЕЛ!\n{' '.join(notifications[u])}", 
                                 parse_mode="HTML"
                             )
-                        except Exception as e:
-                            logger(f"Не удалось отправить уведомление в {cid}: {e}")
-                accounts.pop(u)
-                start_times.pop(u, None)
+                        except: pass
+                accounts.pop(u); start_times.pop(u, None)
         await refresh_panels()
         await save_data()
         await asyncio.sleep(30)
 
 async def main():
-    logger("Запуск системы v34...")
+    logger("Запуск системы v35 с авто-восстановлением...")
     await load_data()
     asyncio.create_task(monitor())
     
