@@ -21,7 +21,7 @@ accounts = {}
 start_times = {}   
 notifications = {} 
 status_messages = {}
-last_text = {} # Чтобы не обновлять, если текст тот же
+last_text = {} 
 
 def logger(msg):
     print(f"DEBUG [{time.strftime('%H:%M:%S')}]: {msg}")
@@ -32,12 +32,12 @@ async def load_data():
     if not REDIS_URL: return
     try:
         db = redis.from_url(REDIS_URL, decode_responses=True)
-        raw = await db.get("BSS_V32_FINAL")
+        raw = await db.get("BSS_V33_FIX")
         if raw:
             data = json.loads(raw)
             notifications.update(data.get("notifs", {}))
             status_messages.update(data.get("msgs", {}))
-            logger("Данные подтянуты из базы")
+            logger("Данные загружены")
     except Exception as e:
         logger(f"Ошибка БД: {e}")
 
@@ -45,10 +45,10 @@ async def save_data():
     if not db: return
     try:
         data = {"notifs": notifications, "msgs": status_messages}
-        await db.set("BSS_V32_FINAL", json.dumps(data))
+        await db.set("BSS_V33_FIX", json.dumps(data))
     except: pass
 
-# --- Текст ---
+# --- Логика текста ---
 def get_status_text():
     now = time.time()
     text = f"<b>🐝 Состояние Улья BSS</b>\n"
@@ -66,30 +66,36 @@ async def refresh_panels():
     if not status_messages: return
     text = get_status_text()
     for cid, mid in list(status_messages.items()):
-        if last_text.get(cid) == text: continue # Пропуск если текст не изменился
+        if last_text.get(str(cid)) == text: continue
         try:
-            await bot.edit_message_text(text, int(cid), int(mid), parse_mode="HTML")
-            last_text[cid] = text
+            # ФИКС ТУТ: принудительно str(cid)
+            await bot.edit_message_text(
+                text=text,
+                chat_id=str(cid), 
+                message_id=int(mid),
+                parse_mode="HTML"
+            )
+            last_text[str(cid)] = text
         except Exception as e:
-            if "message is not modified" not in str(e):
-                logger(f"Ошибка обновления: {e}")
+            if "message is not modified" not in str(e).lower():
+                logger(f"Ошибка обновления чата {cid}: {e}")
 
 # --- Команды ---
 
 @dp.message(Command("information", ignore_case=True))
 async def cmd_info(m: types.Message):
-    cid = str(m.chat.id)
-    # Удаляем старое сообщение перед созданием нового
-    if cid in status_messages:
-        try: await bot.delete_message(m.chat.id, status_messages[cid])
+    cid_str = str(m.chat.id)
+    if cid_str in status_messages:
+        try: await bot.delete_message(chat_id=cid_str, message_id=status_messages[cid_str])
         except: pass
 
     msg = await m.answer(get_status_text(), parse_mode="HTML")
-    status_messages[cid] = msg.message_id
+    status_messages[cid_str] = msg.message_id
     try:
-        await bot.pin_chat_message(m.chat.id, msg.message_id, disable_notification=True)
+        await bot.pin_chat_message(chat_id=cid_str, message_id=msg.message_id, disable_notification=True)
         await asyncio.sleep(1)
-        await bot.delete_message(m.chat.id, msg.message_id + 1)
+        # Чистим сервисное сообщение
+        await bot.delete_message(chat_id=cid_str, message_id=msg.message_id + 1)
     except: pass
     await save_data()
 
@@ -103,14 +109,7 @@ async def cmd_add(m: types.Message):
     await save_data()
     await m.answer(f"✅ Пинг для {acc} добавлен")
 
-@dp.message(Command("list", ignore_case=True))
-async def cmd_list(m: types.Message):
-    if not notifications: return await m.answer("Список пуст.")
-    res = "<b>📜 Подписки:</b>\n"
-    for k, v in notifications.items(): res += f"• {k}: {', '.join(v)}\n"
-    await m.answer(res, parse_mode="HTML")
-
-# --- Сервер и Цикл ---
+# --- Сервер и Циклы ---
 
 async def handle_signal(request):
     try:
@@ -131,7 +130,8 @@ async def monitor():
             if now - accounts[u] > 180:
                 if u in notifications:
                     for cid in status_messages:
-                        try: await bot.send_message(int(cid), f"🚨 <b>{u}</b> ВЫЛЕТЕЛ!\n{' '.join(notifications[u])}", parse_mode="HTML")
+                        try: 
+                            await bot.send_message(chat_id=str(cid), text=f"🚨 <b>{u}</b> ВЫЛЕТЕЛ!\n{' '.join(notifications[u])}", parse_mode="HTML")
                         except: pass
                 accounts.pop(u)
                 start_times.pop(u, None)
@@ -140,7 +140,7 @@ async def monitor():
         await asyncio.sleep(30)
 
 async def main():
-    logger("Запуск системы...")
+    logger("Запуск исправленной системы v33...")
     await load_data()
     asyncio.create_task(monitor())
     
@@ -149,8 +149,7 @@ async def main():
     runner = web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', PORT).start()
     
-    # Даем Railway время убить старые процессы
-    await asyncio.sleep(2) 
+    await asyncio.sleep(1) 
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
