@@ -27,9 +27,9 @@ start_times = {}
 last_status = {}    
 notifications = {}  
 avatar_cache = {} 
-known_chats = set() # Список чатов для рассылки при перезагрузке
+known_chats = set()
 
-status_messages = {} # {chat_id: message_id} для управления несколькими чатами
+status_messages = {} # {chat_id: message_id}
 last_sent_text = ""
 
 BSS_BG_URLS = [
@@ -89,7 +89,7 @@ async def init_db():
     if REDIS_URL:
         try:
             db = redis.from_url(REDIS_URL, decode_responses=True)
-            raw = await db.get("BSS_PERM_V13")
+            raw = await db.get("BSS_PERM_V14")
             if raw:
                 data = json.loads(raw)
                 notifications.update(data.get("notifs", {}))
@@ -107,7 +107,7 @@ async def save_to_db():
                 "start_times": start_times, "status_messages": status_messages,
                 "known_chats": list(known_chats)
             }
-            await db.set("BSS_PERM_V13", json.dumps(payload))
+            await db.set("BSS_PERM_V14", json.dumps(payload))
         except: pass
 
 # --- Команды ---
@@ -116,7 +116,7 @@ async def save_to_db():
 async def start_cmd(message: types.Message):
     known_chats.add(message.chat.id)
     await save_to_db()
-    await message.answer("🐝 <b>BSS Monitoring v13</b>\n\n/ping — создать панель\n/add Ник — подписаться на вылеты\n/list — настройки\n/img_create — отчет картинкой", parse_mode="HTML")
+    await message.answer("🐝 <b>BSS Monitoring v14</b>\n\n/ping — создать панель\n/add Ник — подписаться на вылеты\n/list — настройки\n/img_create — отчет картинкой", parse_mode="HTML")
 
 @dp.message(Command("ping"))
 async def ping_cmd(message: types.Message):
@@ -125,7 +125,6 @@ async def ping_cmd(message: types.Message):
     try: await message.delete()
     except: pass
     
-    # Удаляем старую панель в этом чате
     cid = str(message.chat.id)
     if cid in status_messages:
         try: await bot.delete_message(message.chat.id, status_messages[cid])
@@ -193,7 +192,7 @@ async def img_create_cmd(message: types.Message):
         await wait.delete(); await message.answer_photo(BufferedInputFile(buf.read(), filename="bss.png"))
     except Exception as e: await message.answer(f"Ошибка: {e}")
 
-# --- Логика ---
+# --- Логика Обновления ---
 
 async def update_panels():
     global last_sent_text
@@ -215,4 +214,52 @@ async def update_panels():
             if is_online:
                 last_status[user] = True
                 st = float(start_times.get(user, now))
-                text += f"🟢 <code>{safe_html(user)}</code> | <b>{format_duration(now
+                # ИСПРАВЛЕННАЯ СТРОКА (v14):
+                text += f"🟢 <code>{safe_html(user)}</code> | <b>{format_duration(now - st)}</b>\n"
+            else: text += f"🔴 <code>{safe_html(user)}</code> | Offline\n"
+
+    if text != last_sent_text:
+        for cid, mid in list(status_messages.items()):
+            try: await bot.edit_message_text(text, int(cid), int(mid), parse_mode="HTML")
+            except: pass
+        last_sent_text = text
+
+async def broadcast_reboot():
+    await asyncio.sleep(5)
+    global status_messages
+    print(f"📢 Рестарт: Рассылка в {len(known_chats)} чатов...")
+    for cid in list(known_chats):
+        try:
+            msg = await bot.send_message(cid, "<b>♻️ Мониторинг перезапущен...</b>", parse_mode="HTML")
+            status_messages[str(cid)] = msg.message_id
+            await bot.pin_chat_message(cid, msg.message_id, disable_notification=True)
+        except: pass
+    await save_to_db()
+
+async def handle_signal(request):
+    try:
+        data = await request.json()
+        if "username" in data:
+            u, now = data["username"], time.time()
+            accounts[u], last_status[u] = now, True
+            if u not in start_times: start_times[u] = now
+            return web.Response(text="OK")
+    except: pass
+    return web.Response(status=400)
+
+async def main():
+    await init_db()
+    app = web.Application(); app.router.add_post('/signal', handle_signal)
+    runner = web.AppRunner(app); await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', PORT).start()
+    
+    asyncio.create_task(status_updater())
+    asyncio.create_task(broadcast_reboot())
+    await dp.start_polling(bot)
+
+async def status_updater():
+    while True:
+        await update_panels(); await save_to_db(); await asyncio.sleep(20)
+
+if __name__ == "__main__":
+    asyncio.run(main())
