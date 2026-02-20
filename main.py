@@ -60,7 +60,7 @@ async def save_data():
 # --- Текст ---
 def get_status_text():
     now = time.time()
-    text = f"<b>🐝 Состояние Улья BSS</b>\n"
+    text = f"<b>🐝 Состояние Макроса BSS</b>\n"
     text += f"🕒 {time.strftime('%H:%M:%S')} | 🔄 Рестартов: {restart_count}\n\n"
     if not accounts:
         text += "<i>Ожидание сигналов от макросов...</i>"
@@ -161,7 +161,7 @@ async def monitor():
     while True:
         now = time.time()
         for u in list(accounts.keys()):
-            if now - accounts[u] > 180:
+            if now - accounts[u] > 90:
                 if u in notifications:
                     for cid in status_messages:
                         try: await bot.send_message(chat_id=str(cid), text=f"🚨 <b>{u}</b> ВЫЛЕТЕЛ!\n{' '.join(notifications[u])}", parse_mode="HTML")
