@@ -49,6 +49,10 @@ def format_duration(seconds):
         return res if res else "0s"
     except: return "0s"
 
+def get_user_id(message: types.Message):
+    u = message.from_user
+    return f"@{u.username}" if u.username else f"ID:{u.id}"
+
 async def get_image_from_url(url):
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
@@ -58,24 +62,17 @@ async def get_image_from_url(url):
     except: return None
 
 async def get_roblox_avatar(username):
-    """Получение аватарки игрока из Roblox API"""
     if username in avatar_cache: return avatar_cache[username]
     try:
         async with aiohttp.ClientSession() as session:
-            # 1. Получаем ID пользователя
             async with session.post("https://users.roblox.com/v1/usernames/users", 
                                      json={"usernames": [username], "excludeBannedUsers": True}) as r:
                 data = await r.json()
-                if not data.get("data"): return None
                 u_id = data["data"][0]["id"]
-            
-            # 2. Получаем ссылку на аватар (голова)
             url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={u_id}&size=150x150&format=Png&isCircular=true"
             async with session.get(url) as r:
                 data = await r.json()
                 img_url = data["data"][0]["imageUrl"]
-            
-            # 3. Качаем картинку
             async with session.get(img_url) as r:
                 img = Image.open(io.BytesIO(await r.read())).convert("RGBA")
                 avatar_cache[username] = img
@@ -88,7 +85,7 @@ async def init_db():
     if REDIS_URL:
         try:
             db = redis.from_url(REDIS_URL, decode_responses=True)
-            raw = await db.get("BSS_PERM_V17")
+            raw = await db.get("BSS_PERM_V18")
             if raw:
                 data = json.loads(raw)
                 notifications.update(data.get("notifs", {}))
@@ -106,7 +103,7 @@ async def save_to_db():
                 "start_times": start_times, "status_messages": status_messages,
                 "known_chats": list(known_chats)
             }
-            await db.set("BSS_PERM_V17", json.dumps(payload))
+            await db.set("BSS_PERM_V18", json.dumps(payload))
         except: pass
 
 # --- Команды ---
@@ -116,11 +113,12 @@ async def start_cmd(message: types.Message):
     known_chats.add(message.chat.id)
     await save_to_db()
     text = (
-        "<b>🐝 BSS Monitoring v17</b>\n\n"
-        "/ping — Панель мониторинга\n"
-        "/img_create — Отчет картинкой\n"
-        "/add Ник — Пинг при вылете\n"
-        "/list — Кто подписан"
+        "<b>🐝 BSS Monitoring v18</b>\n\n"
+        "/ping — Создать панель\n"
+        "/add Ник — Подписаться на вылет\n"
+        "/remove Ник — Отписаться\n"
+        "/list — Список подписок\n"
+        "/img_create — Отчет картинкой"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -137,16 +135,63 @@ async def ping_cmd(message: types.Message):
         except: pass
 
     last_sent_text = "" 
-    msg = await bot.send_message(message.chat.id, "<b>🐝 Синхронизация данных...</b>", parse_mode="HTML")
+    msg = await bot.send_message(message.chat.id, "<b>🐝 Запуск мониторинга...</b>", parse_mode="HTML")
     status_messages[cid] = msg.message_id
     
     try: await bot.pin_chat_message(message.chat.id, msg.message_id, disable_notification=True)
     except: pass
     await save_to_db()
 
+@dp.message(Command("add"))
+async def add_cmd(message: types.Message, command: CommandObject):
+    args = command.args.split() if command.args else []
+    if not args: return await message.answer("Укажите ник: <code>/add Bubas</code>", parse_mode="HTML")
+    
+    rbx = args[0]
+    target = get_user_id(message)
+    
+    if rbx not in notifications:
+        notifications[rbx] = []
+    
+    if target not in notifications[rbx]:
+        notifications[rbx].append(target)
+        await save_to_db()
+        await message.answer(f"✅ Вы подписались на уведомления о вылете <b>{rbx}</b>", parse_mode="HTML")
+    else:
+        await message.answer(f"ℹ️ Вы уже подписаны на <b>{rbx}</b>", parse_mode="HTML")
+
+@dp.message(Command("remove"))
+async def remove_cmd(message: types.Message, command: CommandObject):
+    args = command.args.split() if command.args else []
+    if not args: return await message.answer("Укажите ник: <code>/remove Bubas</code>", parse_mode="HTML")
+    
+    rbx = args[0]
+    target = get_user_id(message)
+    
+    if rbx in notifications and target in notifications[rbx]:
+        notifications[rbx].remove(target)
+        if not notifications[rbx]:
+            del notifications[rbx]
+        await save_to_db()
+        await message.answer(f"❌ Вы отписались от <b>{rbx}</b>", parse_mode="HTML")
+    else:
+        await message.answer(f"ℹ️ Вы не были подписаны на <b>{rbx}</b>", parse_mode="HTML")
+
+@dp.message(Command("list"))
+async def list_cmd(message: types.Message):
+    if not notifications:
+        return await message.answer("🔔 <b>Список подписок пуст.</b>", parse_mode="HTML")
+    
+    text = "<b>🔔 Текущие подписки:</b>\n\n"
+    for rbx, users in notifications.items():
+        if users:
+            text += f"• <code>{rbx}</code>: {', '.join(users)}\n"
+    
+    await message.answer(text, parse_mode="HTML")
+
 @dp.message(Command("img_create"))
 async def img_create_cmd(message: types.Message):
-    if not accounts: return await message.answer("Нет активных игроков.")
+    if not accounts: return await message.answer("Нет данных от макросов.")
     wait = await message.answer("🖼 Рисую отчет...")
     try:
         now = time.time()
@@ -168,7 +213,6 @@ async def img_create_cmd(message: types.Message):
             row_bg = (46, 125, 50, 160) if is_online else (60, 60, 60, 160)
             draw.rounded_rectangle([40, y, 660, y+55], radius=12, fill=row_bg)
             
-            # ОТРИСОВКА АВАТАРКИ
             avatar = await get_roblox_avatar(user)
             if avatar:
                 avatar = avatar.resize((45, 45), Image.LANCZOS)
@@ -237,10 +281,10 @@ async def main():
     
     asyncio.create_task(status_updater())
     
-    # Рестарт во всех чатах
+    # Рестарт во всех активных чатах
     for cid in list(known_chats):
         try:
-            msg = await bot.send_message(cid, "<b>♻️ Система восстановлена.</b>", parse_mode="HTML")
+            msg = await bot.send_message(cid, "<b>♻️ Мониторинг восстановлен.</b>", parse_mode="HTML")
             status_messages[str(cid)] = msg.message_id
         except: pass
 
