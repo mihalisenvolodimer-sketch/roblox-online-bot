@@ -17,7 +17,6 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 db = None
 
-# Данные
 accounts = {}      
 start_times = {}   
 notifications = {} 
@@ -34,17 +33,15 @@ async def load_data():
     if not REDIS_URL: return
     try:
         db = redis.from_url(REDIS_URL, decode_responses=True)
-        raw = await db.get("BSS_V36_FULL")
+        raw = await db.get("BSS_V37_FINAL_FIX")
         if raw:
             data = json.loads(raw)
             notifications.update(data.get("notifs", {}))
             status_messages.update(data.get("msgs", {}))
             restart_count = data.get("restarts", 0) + 1
-            # Восстанавливаем время старта аккаунтов, чтобы таймер не сбивался
             saved_starts = data.get("starts", {})
-            for k, v in saved_starts.items():
-                start_times[k] = float(v)
-            logger(f"✅ Восстановлено! Рестарт №{restart_count}. Активных подписок: {len(notifications)}")
+            for k, v in saved_starts.items(): start_times[k] = float(v)
+            logger(f"✅ Восстановлено. Рестарт: {restart_count}")
     except Exception as e:
         logger(f"Ошибка БД: {e}")
 
@@ -55,9 +52,9 @@ async def save_data():
             "notifs": notifications, 
             "msgs": status_messages, 
             "restarts": restart_count,
-            "starts": start_times # Сохраняем таймеры
+            "starts": start_times 
         }
-        await db.set("BSS_V36_FULL", json.dumps(data))
+        await db.set("BSS_V37_FINAL_FIX", json.dumps(data))
     except: pass
 
 # --- Текст ---
@@ -65,12 +62,10 @@ def get_status_text():
     now = time.time()
     text = f"<b>🐝 Состояние Улья BSS</b>\n"
     text += f"🕒 {time.strftime('%H:%M:%S')} | 🔄 Рестартов: {restart_count}\n\n"
-    
     if not accounts:
         text += "<i>Ожидание сигналов от макросов...</i>"
     else:
         for u in sorted(accounts.keys()):
-            # Берем сохраненное время старта или текущее, если новый
             s_time = start_times.get(u, now)
             dur = int(now - s_time)
             h, m, s = dur//3600, (dur%3600)//60, dur%60
@@ -82,68 +77,72 @@ async def refresh_panels():
     for cid, mid in list(status_messages.items()):
         if last_text.get(str(cid)) == text: continue
         try:
-            await bot.edit_message_text(text, str(cid), int(mid), parse_mode="HTML")
+            # ИСПОЛЬЗУЕМ ЯВНЫЕ ИМЕНА АРГУМЕНТОВ (chat_id=...), это лечит business_connection
+            await bot.edit_message_text(
+                chat_id=str(cid),
+                message_id=int(mid),
+                text=text,
+                parse_mode="HTML"
+            )
             last_text[str(cid)] = text
         except Exception as e:
             if "not modified" not in str(e).lower():
                 logger(f"Ошибка обновления {cid}: {e}")
 
-# --- КОМАНДЫ (Переписаны для надежности) ---
+# --- Команды ---
 
 @dp.message(Command("start", ignore_case=True))
 async def cmd_start(m: types.Message):
-    logger(f"Команда /start от {m.from_user.id}")
-    await m.answer("🐝 Бот v36 готов.\n/information — панель\n/add [Ник] — пинг\n/delete [Ник] — убрать пинг\n/list — список")
+    await m.answer("<b>Улей v37</b>\n/information - панель\n/add [Ник] - пинг\n/remove [Ник] - удалить", parse_mode="HTML")
 
 @dp.message(Command("information", ignore_case=True))
 async def cmd_info(m: types.Message):
     cid = str(m.chat.id)
-    logger(f"Запрос панели в {cid}")
     if cid in status_messages:
-        try: await bot.delete_message(cid, status_messages[cid])
+        try: await bot.delete_message(chat_id=cid, message_id=status_messages[cid])
         except: pass
     msg = await m.answer(get_status_text(), parse_mode="HTML")
     status_messages[cid] = msg.message_id
     try:
-        await bot.pin_chat_message(cid, msg.message_id, disable_notification=True)
+        await bot.pin_chat_message(chat_id=cid, message_id=msg.message_id, disable_notification=True)
         await asyncio.sleep(1)
-        await bot.delete_message(cid, msg.message_id + 1)
+        await bot.delete_message(chat_id=cid, message_id=msg.message_id + 1)
     except: pass
     await save_data()
 
 @dp.message(Command("add", ignore_case=True))
 async def cmd_add(m: types.Message):
     args = m.text.split()
-    if len(args) < 2: return await m.answer("Укажи ник!")
+    if len(args) < 2: return await m.answer("Ник?")
     acc = args[1]
     tag = f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}"
-    if acc not in notifications: notifications[acc] = []
-    if tag not in notifications[acc]: notifications[acc].append(tag)
-    logger(f"Добавлен пинг {acc} для {tag}")
+    notifications.setdefault(acc, []).append(tag)
     await save_data()
-    await m.answer(f"✅ Пинг для <b>{acc}</b> добавлен", parse_mode="HTML")
+    await m.answer(f"✅ Пинг для {acc} добавлен")
 
-@dp.message(Command("delete", ignore_case=True))
-async def cmd_delete(m: types.Message):
+# Работает и /delete, и /remove
+@dp.message(Command("delete", "remove", ignore_case=True))
+async def cmd_remove(m: types.Message):
     args = m.text.split()
-    if len(args) < 2: return
+    if len(args) < 2: return await m.answer("Ник?")
     acc = args[1]
     tag = f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}"
     if acc in notifications and tag in notifications[acc]:
         notifications[acc].remove(tag)
         if not notifications[acc]: del notifications[acc]
-        logger(f"Удален пинг {acc} для {tag}")
         await save_data()
         await m.answer(f"❌ Пинг для {acc} удален")
+    else:
+        await m.answer(f"Пинг для {acc} не найден")
 
 @dp.message(Command("list", ignore_case=True))
 async def cmd_list(m: types.Message):
     if not notifications: return await m.answer("Список пуст")
     res = "<b>📜 Подписки:</b>\n"
-    for k, v in notifications.items(): res += f"• {k}: {', '.join(v)}\n"
+    for k, v in notifications.items(): res += f"• {k}: {', '.join(set(v))}\n"
     await m.answer(res, parse_mode="HTML")
 
-# --- Сигналы и Циклы ---
+# --- Сигналы ---
 
 async def handle_signal(request):
     try:
@@ -151,7 +150,7 @@ async def handle_signal(request):
         u = data.get("username")
         if u:
             now = time.time()
-            if u not in start_times: start_times[u] = now # Запоминаем время самого первого входа
+            if u not in start_times: start_times[u] = now
             accounts[u] = now
             asyncio.create_task(refresh_panels())
             return web.Response(text="OK")
@@ -162,15 +161,12 @@ async def monitor():
     while True:
         now = time.time()
         for u in list(accounts.keys()):
-            if now - accounts[u] > 180: # Вылет
-                logger(f"Вылет: {u}")
+            if now - accounts[u] > 180:
                 if u in notifications:
                     for cid in status_messages:
-                        try: await bot.send_message(str(cid), f"🚨 <b>{u}</b> ВЫЛЕТЕЛ!\n{' '.join(notifications[u])}", parse_mode="HTML")
+                        try: await bot.send_message(chat_id=str(cid), text=f"🚨 <b>{u}</b> ВЫЛЕТЕЛ!\n{' '.join(notifications[u])}", parse_mode="HTML")
                         except: pass
                 accounts.pop(u)
-                # start_times не удаляем, чтобы при перезаходе время продолжилось (или удаляем если хочешь сброс)
-                # Давай удалим, чтобы при новом заходе время шло с нуля:
                 start_times.pop(u, None)
         await refresh_panels()
         await save_data()
@@ -182,7 +178,9 @@ async def main():
     app = web.Application(); app.router.add_post('/signal', handle_signal)
     runner = web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', PORT).start()
-    await asyncio.sleep(1)
+    
+    # Большая пауза, чтобы убить старого бота на хостинге
+    await asyncio.sleep(5) 
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
