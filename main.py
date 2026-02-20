@@ -1,12 +1,5 @@
-import os
-import asyncio
-import time
-import json
-import io
-import random
-import redis.asyncio as redis
-import aiohttp
-from aiogram import Bot, Dispatcher, types
+import os, asyncio, time, json, io, random, redis.asyncio as redis, aiohttp
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile
 from aiohttp import web
@@ -21,17 +14,19 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 db = None
 
-# Состояние
-accounts = {}       
-start_times = {}    
-last_status = {}    
-notifications = {}  
-avatar_cache = {} 
+# Глобальное состояние
+accounts = {}        # {user: last_timestamp}
+start_times = {}     # {user: start_timestamp}
+sessions = {}        # {user: [[start, end, duration], ...]} (max 7)
+notifications = {}   # {user: [ping1, ping2, ...]}
 known_chats = set()
-status_messages = {} 
-last_sent_text = ""
+status_messages = {} # {chat_id: message_id}
+avatar_cache = {}
 
-BSS_BG_URLS = ["https://wallpapercave.com/wp/wp4746717.jpg"]
+BSS_BG_URLS = [
+    "https://wallpapercave.com/wp/wp4746717.jpg",
+    "https://wallpaperaccess.com/full/2153575.jpg"
+]
 
 # --- Утилиты ---
 def safe_html(text):
@@ -39,61 +34,46 @@ def safe_html(text):
 
 def format_duration(seconds):
     try:
-        seconds = int(float(seconds))
-        d, h, m, s = seconds // 86400, (seconds % 86400) // 3600, (seconds % 3600) // 60, seconds % 60
-        res = ""
-        if d > 0: res += f"{d}d "
-        if h > 0: res += f"{h}h "
-        if m > 0: res += f"{m}m "
-        res += f"{s}s"
-        return res if res else "0s"
+        s = int(float(seconds))
+        d, h, m, s = s // 86400, (s % 86400) // 3600, (s % 3600) // 60, s % 60
+        res = f"{d}d " if d > 0 else ""
+        res += f"{h}h " if h > 0 or d > 0 else ""
+        res += f"{m}m {s}s"
+        return res
     except: return "0s"
-
-def get_user_id(message: types.Message):
-    u = message.from_user
-    return f"@{u.username}" if u.username else f"ID:{u.id}"
-
-async def get_image_from_url(url):
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    return Image.open(io.BytesIO(await resp.read())).convert("RGBA")
-    except: return None
 
 async def get_roblox_avatar(username):
     if username in avatar_cache: return avatar_cache[username]
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post("https://users.roblox.com/v1/usernames/users", 
-                                     json={"usernames": [username], "excludeBannedUsers": True}) as r:
-                data = await r.json()
-                u_id = data["data"][0]["id"]
+            async with session.post("https://users.roblox.com/v1/usernames/users", json={"usernames": [username], "excludeBannedUsers": True}) as r:
+                u_id = (await r.json())["data"][0]["id"]
             url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={u_id}&size=150x150&format=Png&isCircular=true"
             async with session.get(url) as r:
-                data = await r.json()
-                img_url = data["data"][0]["imageUrl"]
+                img_url = (await r.json())["data"][0]["imageUrl"]
             async with session.get(img_url) as r:
                 img = Image.open(io.BytesIO(await r.read())).convert("RGBA")
                 avatar_cache[username] = img
                 return img
     except: return None
 
-# --- База Данных ---
+# --- Работа с БД ---
 async def init_db():
-    global db, notifications, accounts, start_times, status_messages, known_chats
+    global db, notifications, accounts, start_times, status_messages, known_chats, sessions
     if REDIS_URL:
         try:
             db = redis.from_url(REDIS_URL, decode_responses=True)
-            raw = await db.get("BSS_PERM_V18")
+            raw = await db.get("BSS_ULTIMATE_V19")
             if raw:
                 data = json.loads(raw)
                 notifications.update(data.get("notifs", {}))
                 accounts.update(data.get("accounts", {}))
                 start_times.update(data.get("start_times", {}))
                 status_messages.update(data.get("status_messages", {}))
+                sessions.update(data.get("sessions", {}))
                 known_chats = set(data.get("known_chats", []))
-        except: pass
+                print(f"[DB] Данные улья загружены. Чатов: {len(status_messages)}")
+        except Exception as e: print(f"[DB] Ошибка: {e}")
 
 async def save_to_db():
     if db:
@@ -101,202 +81,244 @@ async def save_to_db():
             payload = {
                 "notifs": notifications, "accounts": accounts, 
                 "start_times": start_times, "status_messages": status_messages,
-                "known_chats": list(known_chats)
+                "known_chats": list(known_chats), "sessions": sessions
             }
-            await db.set("BSS_PERM_V18", json.dumps(payload))
+            await db.set("BSS_ULTIMATE_V19", json.dumps(payload))
         except: pass
 
 # --- Команды ---
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    known_chats.add(message.chat.id)
-    await save_to_db()
     text = (
-        "<b>🐝 BSS Monitoring v18</b>\n\n"
-        "/ping — Создать панель\n"
-        "/add Ник — Подписаться на вылет\n"
-        "/remove Ник — Отписаться\n"
-        "/list — Список подписок\n"
-        "/img_create — Отчет картинкой"
+        "<b>🐝 Улей BSS: Команды</b>\n\n"
+        "📊 <b>Мониторинг:</b>\n"
+        "/Information — Создать новую панель и закрепить\n"
+        "/ping — Обновить/найти текущую панель\n\n"
+        "🔔 <b>Уведомления:</b>\n"
+        "/add [Ник] [Пинги] — Добавить пинги на аккаунт\n"
+        "/add all [Пинг] — На все текущие аки\n"
+        "/add all all — Везде и всех (админ)\n"
+        "/remove [Ник] — Удалить подписки\n"
+        "/list — История всех аккаунтов и их пинги\n\n"
+        "🖼 <b>Графика:</b>\n"
+        "/img_create — Карточка онлайна\n"
+        "/img_create [Ник] — История 7 сессий игрока\n\n"
+        "📣 <b>Прочее:</b>\n"
+        "/Call — Пинг всех участников улья"
     )
     await message.answer(text, parse_mode="HTML")
-
-@dp.message(Command("ping"))
-async def ping_cmd(message: types.Message):
-    global last_sent_text
-    known_chats.add(message.chat.id)
-    try: await message.delete()
-    except: pass
-    
-    cid = str(message.chat.id)
-    if cid in status_messages:
-        try: await bot.delete_message(message.chat.id, status_messages[cid])
-        except: pass
-
-    last_sent_text = "" 
-    msg = await bot.send_message(message.chat.id, "<b>🐝 Запуск мониторинга...</b>", parse_mode="HTML")
-    status_messages[cid] = msg.message_id
-    
-    try: await bot.pin_chat_message(message.chat.id, msg.message_id, disable_notification=True)
-    except: pass
-    await save_to_db()
 
 @dp.message(Command("add"))
 async def add_cmd(message: types.Message, command: CommandObject):
     args = command.args.split() if command.args else []
-    if not args: return await message.answer("Укажите ник: <code>/add Bubas</code>", parse_mode="HTML")
+    target_user = get_user_ping(message)
     
-    rbx = args[0]
-    target = get_user_id(message)
-    
-    if rbx not in notifications:
-        notifications[rbx] = []
-    
-    if target not in notifications[rbx]:
-        notifications[rbx].append(target)
-        await save_to_db()
-        await message.answer(f"✅ Вы подписались на уведомления о вылете <b>{rbx}</b>", parse_mode="HTML")
+    # Логика Reply (если ответили на сообщение человека)
+    if message.reply_to_message:
+        target_user = get_user_ping(message.reply_to_message)
+
+    if not args: return await message.answer("Использование: /add [Ник] [Пинги]")
+
+    if args[0].lower() == "all":
+        sub_args = args[1:] if len(args) > 1 else [target_user]
+        # /add all all
+        if len(args) > 1 and args[1].lower() == "all":
+            for acc in accounts:
+                notifications.setdefault(acc, [])
+                if target_user not in notifications[acc]: notifications[acc].append(target_user)
+            return await message.answer("✅ Добавлены везде.")
+        # /add all [пинг]
+        for acc in accounts:
+            notifications.setdefault(acc, [])
+            for p in sub_args:
+                if p not in notifications[acc]: notifications[acc].append(p)
     else:
-        await message.answer(f"ℹ️ Вы уже подписаны на <b>{rbx}</b>", parse_mode="HTML")
+        acc = args[0]
+        pings = args[1:] if len(args) > 1 else [target_user]
+        notifications.setdefault(acc, [])
+        for p in pings:
+            if p not in notifications[acc]: notifications[acc].append(p)
+    
+    await save_to_db()
+    await message.answer("✅ Настройки пингов обновлены.")
+
+def get_user_ping(m):
+    return f"@{m.from_user.username}" if m.from_user.username else f"<a href='tg://user?id={m.from_user.id}'>User</a>"
 
 @dp.message(Command("remove"))
 async def remove_cmd(message: types.Message, command: CommandObject):
     args = command.args.split() if command.args else []
-    if not args: return await message.answer("Укажите ник: <code>/remove Bubas</code>", parse_mode="HTML")
+    target = get_user_ping(message)
+    if not args: return await message.answer("/remove [Ник]")
     
-    rbx = args[0]
-    target = get_user_id(message)
+    acc = args[0]
+    if acc.lower() == "all":
+        for a in notifications:
+            if target in notifications[a]: notifications[a].remove(target)
+    elif acc in notifications and target in notifications[acc]:
+        notifications[acc].remove(target)
     
-    if rbx in notifications and target in notifications[rbx]:
-        notifications[rbx].remove(target)
-        if not notifications[rbx]:
-            del notifications[rbx]
-        await save_to_db()
-        await message.answer(f"❌ Вы отписались от <b>{rbx}</b>", parse_mode="HTML")
-    else:
-        await message.answer(f"ℹ️ Вы не были подписаны на <b>{rbx}</b>", parse_mode="HTML")
+    await save_to_db()
+    await message.answer(f"❌ Пинги для {acc} удалены.")
 
 @dp.message(Command("list"))
 async def list_cmd(message: types.Message):
-    if not notifications:
-        return await message.answer("🔔 <b>Список подписок пуст.</b>", parse_mode="HTML")
-    
-    text = "<b>🔔 Текущие подписки:</b>\n\n"
-    for rbx, users in notifications.items():
-        if users:
-            text += f"• <code>{rbx}</code>: {', '.join(users)}\n"
-    
+    if not accounts and not sessions: return await message.answer("Улей пуст.")
+    text = "<b>📜 Реестр Улья:</b>\n\n"
+    all_names = set(list(accounts.keys()) + list(sessions.keys()))
+    for name in all_names:
+        last_seen = time.strftime('%H:%M', time.localtime(float(accounts.get(name, 0))))
+        pings = notifications.get(name, [])
+        p_str = ", ".join(pings) if pings else "💨 Нет пингов"
+        text += f"👤 <code>{name}</code> | ЛОГ: {last_seen}\n└ Пинги: {p_str}\n\n"
     await message.answer(text, parse_mode="HTML")
 
+@dp.message(Command("Information"))
+async def info_cmd(message: types.Message):
+    known_chats.add(message.chat.id)
+    cid = str(message.chat.id)
+    
+    # Убираем старый закреп
+    if cid in status_messages:
+        try: await bot.unpin_chat_message(message.chat.id, status_messages[cid])
+        except: pass
+
+    msg = await bot.send_message(message.chat.id, "<b>🐝 Заселение нового Улья...</b>", parse_mode="HTML")
+    status_messages[cid] = msg.message_id
+    
+    try: 
+        await bot.pin_chat_message(message.chat.id, msg.message_id, disable_notification=True)
+        # Удаление сервисного сообщения "закрепил сообщение"
+        # Обычно это сообщение с message_id + 1, но надежнее ловить его через контент
+    except: pass
+    await save_to_db()
+
+@dp.message(Command("Call"))
+async def call_cmd(message: types.Message):
+    all_pings = set()
+    for plist in notifications.values():
+        for p in plist: all_pings.add(p)
+    if not all_pings: return await message.answer("Никто не настроил пинги.")
+    await message.answer(f"📣 <b>ОБЩИЙ СБОР УЛЬЯ:</b>\n{ ' '.join(all_pings) }", parse_mode="HTML")
+
 @dp.message(Command("img_create"))
-async def img_create_cmd(message: types.Message):
-    if not accounts: return await message.answer("Нет данных от макросов.")
-    wait = await message.answer("🖼 Рисую отчет...")
+async def img_create_cmd(message: types.Message, command: CommandObject):
+    args = command.args.split() if command.args else []
+    wait = await message.answer("🖼 Рисую...")
     try:
         now = time.time()
-        width, height = 700, 150 + (len(accounts) * 65)
-        bg_img = await get_image_from_url(random.choice(BSS_BG_URLS))
-        if not bg_img: bg_img = Image.new('RGBA', (width, height), (30, 30, 30, 255))
-        else:
-            bg_img = bg_img.resize((width, height), Image.LANCZOS)
-            bg_img = ImageEnhance.Brightness(bg_img).enhance(0.4)
+        bg_url = random.choice(BSS_BG_URLS)
         
-        draw = ImageDraw.Draw(bg_img)
-        try: font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
-        except: font = ImageFont.load_default()
-        
-        draw.text((40, 30), f"BSS REPORT | {time.strftime('%H:%M:%S')}", fill=(255,255,255), font=font)
-        y = 110
-        for user in sorted(accounts.keys()):
-            is_online = (now - float(accounts[user])) < 150
-            row_bg = (46, 125, 50, 160) if is_online else (60, 60, 60, 160)
-            draw.rounded_rectangle([40, y, 660, y+55], radius=12, fill=row_bg)
+        if args: # Логика сессий конкретного игрока
+            user = args[0]
+            user_sessions = sessions.get(user, [])
+            width, height = 700, 500
+            img = await generate_session_img(user, user_sessions, bg_url)
+        else: # Общий онлайн
+            width, height = 700, 150 + (len(accounts) * 65)
+            img = await generate_online_img(accounts, start_times, bg_url)
             
-            avatar = await get_roblox_avatar(user)
-            if avatar:
-                avatar = avatar.resize((45, 45), Image.LANCZOS)
-                bg_img.paste(avatar, (50, y+5), avatar if avatar.mode == 'RGBA' else None)
-            
-            st = float(start_times.get(user, now))
-            dur = format_duration(now - st) if is_online else "Offline"
-            draw.text((110, y+15), f"{user} | {dur}", fill=(255,255,255), font=font)
-            y += 65
-            
-        buf = io.BytesIO(); bg_img.convert("RGB").save(buf, format='PNG'); buf.seek(0)
+        buf = io.BytesIO(); img.convert("RGB").save(buf, format='PNG'); buf.seek(0)
         await wait.delete(); await message.answer_photo(BufferedInputFile(buf.read(), filename="bss.png"))
-    except Exception as e: await message.answer(f"Ошибка картинки: {e}")
+    except Exception as e: await message.answer(f"Ошибка: {e}")
 
-# --- Логика Обновления ---
+# --- Фоновые процессы ---
 
-async def update_panels():
-    global last_sent_text
-    if not status_messages: return
-    now = time.time()
-    text = f"<b>📊 BSS Мониторинг</b>\n🕒 Обновлено: <code>{time.strftime('%H:%M:%S')}</code>\n\n"
-    
-    if not accounts:
-        text += "<i>Ожидание макросов...</i>"
-    else:
+async def update_loop():
+    while True:
+        now = time.time()
+        # Проверка вылетов
         for user in list(accounts.keys()):
-            is_online = (now - float(accounts[user])) < 150
-            if is_online:
-                st = float(start_times.get(user, now))
-                text += f"🟢 <code>{safe_html(user)}</code> | <b>{format_duration(now - st)}</b>\n"
-                last_status[user] = True
-            else:
-                if last_status.get(user, False):
-                    if user in notifications:
-                        for cid in status_messages:
-                            try: await bot.send_message(int(cid), f"⚠️ <b>{user}</b> ВЫЛЕТЕЛ!\n{' '.join(notifications[user])}", parse_mode="HTML")
-                            except: pass
-                    start_times.pop(user, None)
-                    accounts.pop(user, None)
-                    last_status[user] = False
-                continue
+            last_val = float(accounts[user])
+            if (now - last_val) > 150: # Вылетел (2.5 минуты тишины)
+                if user in notifications:
+                    pings = " ".join(notifications[user])
+                    for cid in status_messages:
+                        try: await bot.send_message(int(cid), f"🔴 <b>{user}</b> покинул Улей!\n{pings}", parse_mode="HTML")
+                        except: pass
+                
+                # Сохраняем сессию
+                duration = now - float(start_times.get(user, now))
+                s_list = sessions.get(user, [])
+                s_list.append([start_times.get(user, now), now, duration])
+                sessions[user] = s_list[-7:] # Только 7 последних
+                
+                accounts.pop(user, None)
+                start_times.pop(user, None)
 
-    if text != last_sent_text:
+        # Редактирование панелей
+        text = f"<b>🐝 Состояние Улья BSS</b>\n🕒 {time.strftime('%H:%M:%S')}\n\n"
+        if not accounts: text += "<i>Все пчелы спят...</i>"
+        else:
+            for u in accounts:
+                dur = format_duration(now - float(start_times.get(u, now)))
+                text += f"🟢 <code>{u}</code> | <b>{dur}</b>\n"
+        
         for cid, mid in list(status_messages.items()):
-            try:
-                await bot.edit_message_text(text=text, chat_id=int(cid), message_id=int(mid), parse_mode="HTML")
+            try: await bot.edit_message_text(text, int(cid), int(mid), parse_mode="HTML")
             except: pass
-        last_sent_text = text
+        
+        await save_to_db()
+        await asyncio.sleep(25)
 
 async def handle_signal(request):
     try:
         data = await request.json()
-        if "username" in data:
-            u, now = data["username"], time.time()
+        u = data.get("username")
+        if u:
+            now = time.time()
+            if u not in accounts: start_times[u] = now
             accounts[u] = now
-            if u not in start_times: start_times[u] = now
             return web.Response(text="OK")
     except: pass
     return web.Response(status=400)
 
+# --- Рисование ---
+
+async def generate_online_img(accs, starts, bg_url):
+    now = time.time()
+    h = 150 + (len(accs) * 70)
+    base = await get_image_from_url(bg_url)
+    base = base.resize((700, h)).convert("RGBA")
+    base = ImageEnhance.Brightness(base).enhance(0.3)
+    draw = ImageDraw.Draw(base)
+    y = 100
+    for u in sorted(accs.keys()):
+        draw.rounded_rectangle([40, y, 660, y+60], radius=15, fill=(50, 50, 50, 180))
+        av = await get_roblox_avatar(u)
+        if av: base.paste(av.resize((50,50)), (50, y+5), av.resize((50,50)))
+        dur = format_duration(now - float(starts.get(u, now)))
+        draw.text((120, y+15), f"{u} | {dur}", fill="white")
+        y += 70
+    return base
+
+async def generate_session_img(user, sess_data, bg_url):
+    base = await get_image_from_url(bg_url)
+    base = base.resize((700, 500)).convert("RGBA")
+    draw = ImageDraw.Draw(base)
+    draw.text((50, 50), f"SESSIONS: {user}", fill="yellow")
+    y = 100
+    if not sess_data: draw.text((50, 150), "No data found", fill="white")
+    for s in sess_data:
+        date_str = time.strftime('%d.%m %H:%M', time.localtime(s[0]))
+        draw.text((50, y), f"📅 {date_str} | Time: {format_duration(s[2])}", fill="white")
+        y += 40
+    return base
+
+async def get_image_from_url(url):
+    async with aiohttp.ClientSession() as s:
+        async with s.get(url) as r: return Image.open(io.BytesIO(await r.read()))
+
+# --- Запуск ---
+
 async def main():
     await init_db()
+    asyncio.create_task(update_loop())
     app = web.Application(); app.router.add_post('/signal', handle_signal)
     runner = web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', PORT).start()
-    
-    asyncio.create_task(status_updater())
-    
-    # Рестарт во всех активных чатах
-    for cid in list(known_chats):
-        try:
-            msg = await bot.send_message(cid, "<b>♻️ Мониторинг восстановлен.</b>", parse_mode="HTML")
-            status_messages[str(cid)] = msg.message_id
-        except: pass
-
     await dp.start_polling(bot)
-
-async def status_updater():
-    while True:
-        try:
-            await update_panels()
-            await save_to_db()
-        except: pass
-        await asyncio.sleep(20)
 
 if __name__ == "__main__":
     asyncio.run(main())
