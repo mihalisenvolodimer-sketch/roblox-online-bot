@@ -57,13 +57,38 @@ async def get_image_from_url(url):
                     return Image.open(io.BytesIO(await resp.read())).convert("RGBA")
     except: return None
 
+async def get_roblox_avatar(username):
+    """Получение аватарки игрока из Roblox API"""
+    if username in avatar_cache: return avatar_cache[username]
+    try:
+        async with aiohttp.ClientSession() as session:
+            # 1. Получаем ID пользователя
+            async with session.post("https://users.roblox.com/v1/usernames/users", 
+                                     json={"usernames": [username], "excludeBannedUsers": True}) as r:
+                data = await r.json()
+                if not data.get("data"): return None
+                u_id = data["data"][0]["id"]
+            
+            # 2. Получаем ссылку на аватар (голова)
+            url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={u_id}&size=150x150&format=Png&isCircular=true"
+            async with session.get(url) as r:
+                data = await r.json()
+                img_url = data["data"][0]["imageUrl"]
+            
+            # 3. Качаем картинку
+            async with session.get(img_url) as r:
+                img = Image.open(io.BytesIO(await r.read())).convert("RGBA")
+                avatar_cache[username] = img
+                return img
+    except: return None
+
 # --- База Данных ---
 async def init_db():
     global db, notifications, accounts, start_times, status_messages, known_chats
     if REDIS_URL:
         try:
             db = redis.from_url(REDIS_URL, decode_responses=True)
-            raw = await db.get("BSS_PERM_V16")
+            raw = await db.get("BSS_PERM_V17")
             if raw:
                 data = json.loads(raw)
                 notifications.update(data.get("notifs", {}))
@@ -71,8 +96,7 @@ async def init_db():
                 start_times.update(data.get("start_times", {}))
                 status_messages.update(data.get("status_messages", {}))
                 known_chats = set(data.get("known_chats", []))
-                print(f"[DB] Загружено. Чатов: {len(known_chats)}")
-        except Exception as e: print(f"[DB] Ошибка: {e}")
+        except: pass
 
 async def save_to_db():
     if db:
@@ -82,8 +106,8 @@ async def save_to_db():
                 "start_times": start_times, "status_messages": status_messages,
                 "known_chats": list(known_chats)
             }
-            await db.set("BSS_PERM_V16", json.dumps(payload))
-        except Exception as e: print(f"[DB] Ошибка сохранения: {e}")
+            await db.set("BSS_PERM_V17", json.dumps(payload))
+        except: pass
 
 # --- Команды ---
 
@@ -92,11 +116,11 @@ async def start_cmd(message: types.Message):
     known_chats.add(message.chat.id)
     await save_to_db()
     text = (
-        "<b>🐝 BSS Monitoring v16</b>\n\n"
-        "/ping — Создать живую панель\n"
+        "<b>🐝 BSS Monitoring v17</b>\n\n"
+        "/ping — Панель мониторинга\n"
         "/img_create — Отчет картинкой\n"
-        "/add Ник — Подписаться на вылет\n"
-        "/list — Список подписок"
+        "/add Ник — Пинг при вылете\n"
+        "/list — Кто подписан"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -113,33 +137,16 @@ async def ping_cmd(message: types.Message):
         except: pass
 
     last_sent_text = "" 
-    msg = await bot.send_message(message.chat.id, "<b>🐝 Собираю данные...</b>", parse_mode="HTML")
+    msg = await bot.send_message(message.chat.id, "<b>🐝 Синхронизация данных...</b>", parse_mode="HTML")
     status_messages[cid] = msg.message_id
     
     try: await bot.pin_chat_message(message.chat.id, msg.message_id, disable_notification=True)
     except: pass
     await save_to_db()
 
-@dp.message(Command("add"))
-async def add_cmd(message: types.Message, command: CommandObject):
-    args = command.args.split() if command.args else []
-    if not args: return await message.answer("Пример: /add Bubas")
-    rbx, target = args[0], (f"@{message.from_user.username}" if message.from_user.username else f"ID:{message.from_user.id}")
-    if rbx not in notifications: notifications[rbx] = []
-    if target not in notifications[rbx]: notifications[rbx].append(target)
-    await save_to_db(); await message.answer(f"✅ Пинг для {rbx} добавлен")
-
-@dp.message(Command("list"))
-async def list_cmd(message: types.Message):
-    if not notifications: return await message.answer("Пингов нет.")
-    text = "<b>🔔 Список пингов:</b>\n"
-    for rbx, users in notifications.items():
-        if users: text += f"• <code>{rbx}</code>: {', '.join(users)}\n"
-    await message.answer(text, parse_mode="HTML")
-
 @dp.message(Command("img_create"))
 async def img_create_cmd(message: types.Message):
-    if not accounts: return await message.answer("Нет данных.")
+    if not accounts: return await message.answer("Нет активных игроков.")
     wait = await message.answer("🖼 Рисую отчет...")
     try:
         now = time.time()
@@ -160,16 +167,23 @@ async def img_create_cmd(message: types.Message):
             is_online = (now - float(accounts[user])) < 150
             row_bg = (46, 125, 50, 160) if is_online else (60, 60, 60, 160)
             draw.rounded_rectangle([40, y, 660, y+55], radius=12, fill=row_bg)
+            
+            # ОТРИСОВКА АВАТАРКИ
+            avatar = await get_roblox_avatar(user)
+            if avatar:
+                avatar = avatar.resize((45, 45), Image.LANCZOS)
+                bg_img.paste(avatar, (50, y+5), avatar if avatar.mode == 'RGBA' else None)
+            
             st = float(start_times.get(user, now))
             dur = format_duration(now - st) if is_online else "Offline"
-            draw.text((60, y+15), f"{user} | {dur}", fill=(255,255,255), font=font)
+            draw.text((110, y+15), f"{user} | {dur}", fill=(255,255,255), font=font)
             y += 65
             
         buf = io.BytesIO(); bg_img.convert("RGB").save(buf, format='PNG'); buf.seek(0)
         await wait.delete(); await message.answer_photo(BufferedInputFile(buf.read(), filename="bss.png"))
-    except Exception as e: await message.answer(f"Ошибка: {e}")
+    except Exception as e: await message.answer(f"Ошибка картинки: {e}")
 
-# --- Логика ---
+# --- Логика Обновления ---
 
 async def update_panels():
     global last_sent_text
@@ -200,10 +214,8 @@ async def update_panels():
     if text != last_sent_text:
         for cid, mid in list(status_messages.items()):
             try:
-                # Фикс валидации: передаем chat_id как int в именованный параметр
                 await bot.edit_message_text(text=text, chat_id=int(cid), message_id=int(mid), parse_mode="HTML")
-            except Exception as e:
-                print(f"[ERR] Update fail: {e}")
+            except: pass
         last_sent_text = text
 
 async def handle_signal(request):
@@ -225,10 +237,10 @@ async def main():
     
     asyncio.create_task(status_updater())
     
-    # Рассылка при рестарте
+    # Рестарт во всех чатах
     for cid in list(known_chats):
         try:
-            msg = await bot.send_message(cid, "<b>♻️ Перезагрузка системы...</b>", parse_mode="HTML")
+            msg = await bot.send_message(cid, "<b>♻️ Система восстановлена.</b>", parse_mode="HTML")
             status_messages[str(cid)] = msg.message_id
         except: pass
 
