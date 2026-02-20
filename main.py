@@ -1,5 +1,5 @@
 import os, asyncio, time, json, redis.asyncio as redis, aiohttp
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiohttp import web
 
@@ -12,19 +12,19 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 db = None
 
-# Состояние в памяти
+# Данные
 accounts = {}      
 start_times = {}   
 notifications = {} 
 status_messages = {}
 
-# --- Работа с базой ---
+# --- База Данных ---
 async def load_data():
     global db, notifications, status_messages
     if not REDIS_URL: return
     try:
         db = redis.from_url(REDIS_URL, decode_responses=True)
-        raw = await db.get("BSS_V29_STEADY")
+        raw = await db.get("BSS_V30_ULTRA")
         if raw:
             data = json.loads(raw)
             notifications.update(data.get("notifs", {}))
@@ -35,15 +35,15 @@ async def save_data():
     if not db: return
     try:
         data = {"notifs": notifications, "msgs": status_messages}
-        await db.set("BSS_V29_STEADY", json.dumps(data))
+        await db.set("BSS_V30_ULTRA", json.dumps(data))
     except: pass
 
-# --- Утилиты ---
+# --- Логика Текста ---
 def get_status_text():
     now = time.time()
     text = f"<b>🐝 Состояние Улья BSS</b>\n🕒 {time.strftime('%H:%M:%S')}\n\n"
     if not accounts:
-        text += "<i>Ожидание сигналов от макросов...</i>"
+        text += "<i>Пчелы спят. Ожидание макросов...</i>"
     else:
         for u in sorted(accounts.keys()):
             dur = int(now - start_times.get(u, now))
@@ -51,47 +51,69 @@ def get_status_text():
             text += f"🟢 <code>{u}</code> | <b>{h}ч {m}м {s}с</b>\n"
     return text
 
-async def refresh_panels():
+async def force_refresh():
     text = get_status_text()
     for cid, mid in list(status_messages.items()):
         try:
             await bot.edit_message_text(text, int(cid), int(mid), parse_mode="HTML")
-        except: pass
+        except Exception:
+            pass # Если сообщение удалено или нет изменений
 
-# --- Команды (ТЕПЕРЬ ЛЮБОЙ РЕГИСТР) ---
+# --- Команды ---
 
 @dp.message(Command("start", ignore_case=True))
 async def cmd_start(m: types.Message):
-    await m.answer("<b>🐝 Бот v29 онлайн!</b>\n\n/information — создать панель\n/add [Ник] — пинг\n/call — сбор", parse_mode="HTML")
+    await m.answer("🐝 Бот Улья v30 готов. Используй /information")
 
 @dp.message(Command("information", ignore_case=True))
 async def cmd_info(m: types.Message):
+    cid = str(m.chat.id)
+    
+    # 1. Пытаемся удалить старую панель, если она была
+    if cid in status_messages:
+        try:
+            await bot.delete_message(m.chat.id, status_messages[cid])
+        except:
+            pass
+
+    # 2. Создаем новую
     msg = await m.answer(get_status_text(), parse_mode="HTML")
-    status_messages[str(m.chat.id)] = msg.message_id
+    status_messages[cid] = msg.message_id
+    
     try:
         await bot.pin_chat_message(m.chat.id, msg.message_id, disable_notification=True)
-    except: pass
+        # Удаляем сервисное сообщение "закрепил сообщение"
+        await asyncio.sleep(1)
+        await bot.delete_message(m.chat.id, msg.message_id + 1)
+    except:
+        pass
+        
     await save_data()
 
 @dp.message(Command("add", ignore_case=True))
 async def cmd_add(m: types.Message):
     args = m.text.split()
-    if len(args) < 2: return
+    if len(args) < 2:
+        return await m.answer("Напиши: /add Ник")
+    
     acc = args[1]
     tag = f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}"
+    
     if acc not in notifications: notifications[acc] = []
     if tag not in notifications[acc]: notifications[acc].append(tag)
+    
     await save_data()
-    await m.answer(f"✅ Пинг для {acc} включен")
+    await m.answer(f"✅ Пинг для <b>{acc}</b> добавлен.", parse_mode="HTML")
 
 @dp.message(Command("call", ignore_case=True))
 async def cmd_call(m: types.Message):
     tags = set()
     for t_list in notifications.values():
         for t in t_list: tags.add(t)
-    if tags: await m.answer(f"📣 <b>ОБЩИЙ СБОР:</b>\n\n{' '.join(tags)}", parse_mode="HTML")
+    if tags:
+        await m.answer(f"📣 <b>СБОР УЛЬЯ:</b>\n\n{' '.join(tags)}", parse_mode="HTML")
 
-# --- Сигналы и Циклы ---
+# --- Потоки данных ---
 
 async def handle_signal(request):
     try:
@@ -99,37 +121,47 @@ async def handle_signal(request):
         u = data.get("username")
         if u:
             now = time.time()
-            if u not in accounts: start_times[u] = now
+            if u not in accounts:
+                start_times[u] = now
             accounts[u] = now
-            # Обновляем панель сразу при получении сигнала
-            asyncio.create_task(refresh_panels())
+            # Обновляем сразу при получении сигнала
+            asyncio.create_task(force_refresh())
             return web.Response(text="OK")
     except: pass
     return web.Response(status=400)
 
-async def monitor():
+async def update_loop():
+    """Фоновый цикл обновления времени и проверки вылетов"""
     while True:
-        now = time.time()
-        for u in list(accounts.keys()):
-            if now - accounts[u] > 180: # 3 минуты тишины
-                if u in notifications:
-                    for cid in status_messages:
-                        try: await bot.send_message(int(cid), f"🚨 <b>{u}</b> ВЫЛЕТЕЛ!\n{' '.join(notifications[u])}", parse_mode="HTML")
-                        except: pass
-                accounts.pop(u); start_times.pop(u, None)
-        
-        await refresh_panels()
-        await save_data()
+        try:
+            now = time.time()
+            # Проверка вылетов (180 сек тишины)
+            for u in list(accounts.keys()):
+                if now - accounts[u] > 180:
+                    if u in notifications:
+                        for cid in status_messages:
+                            try:
+                                await bot.send_message(int(cid), f"🚨 <b>{u}</b> ВЫЛЕТЕЛ!\n{' '.join(notifications[u])}", parse_mode="HTML")
+                            except: pass
+                    accounts.pop(u)
+                    start_times.pop(u, None)
+            
+            await force_refresh()
+            await save_data()
+        except Exception as e:
+            print(f"Ошибка цикла: {e}")
+            
         await asyncio.sleep(30)
 
 async def main():
     await load_data()
-    asyncio.create_task(monitor())
-    app = web.Application(); app.router.add_post('/signal', handle_signal)
+    asyncio.create_task(update_loop())
+    
+    app = web.Application()
+    app.router.add_post('/signal', handle_signal)
     runner = web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', PORT).start()
     
-    # Игнорируем старые сообщения и запускаем
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
