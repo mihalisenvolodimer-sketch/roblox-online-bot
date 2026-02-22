@@ -32,7 +32,7 @@ class PostCreation(StatesGroup):
     waiting_for_desc = State()
     waiting_for_confirm = State()
 
-# --- База Данных ---
+# --- База Данных (Ключ без изменений) ---
 async def load_data():
     global db, notifications, status_messages, total_restarts, session_restarts, start_times
     if not REDIS_URL: return
@@ -58,47 +58,61 @@ async def save_data():
         await db.set("BSS_V37_STABLE_FINAL", json.dumps(data))
     except: pass
 
-# --- Тестовые Команды ---
+# --- Тестовые команды ---
 @dp.message(Command("testadd"))
 async def cmd_testadd(m: types.Message):
     if m.from_user.username != ALLOWED_ADMIN: return
-    args = m.text.split()
-    if len(args) < 2: return await m.answer("Укажи ник!")
-    u = args[1]
-    now = time.time()
-    if u not in start_times: start_times[u] = now
-    accounts[u] = now
-    logger(f"🧪 ТЕСТ: Аккаунт {u} добавлен вручную.")
-    await m.answer(f"🧪 <b>{u}</b> добавлен в систему.", parse_mode="HTML")
-    await refresh_panels()
-
-@dp.message(Command("testremove"))
-async def cmd_testremove(m: types.Message):
-    if m.from_user.username != ALLOWED_ADMIN: return
-    args = m.text.split()
-    if len(args) < 2: return await m.answer("Укажи ник!")
-    u = args[1]
-    accounts.pop(u, None)
-    start_times.pop(u, None)
-    logger(f"🧪 ТЕСТ: Аккаунт {u} удален вручную.")
-    await m.answer(f"🧪 <b>{u}</b> удален.", parse_mode="HTML")
-    await refresh_panels()
+    u = m.text.split()[1] if len(m.text.split()) > 1 else None
+    if u:
+        now = time.time()
+        if u not in start_times: start_times[u] = now
+        accounts[u] = now
+        await m.answer(f"🧪 Тест: {u} в сети.")
+        await refresh_panels()
 
 @dp.message(Command("testdisconect"))
 async def cmd_testdis(m: types.Message):
     if m.from_user.username != ALLOWED_ADMIN: return
-    args = m.text.split()
-    if len(args) < 2: return await m.answer("Укажи ник!")
-    u = args[1]
-    if u in accounts:
-        # Ставим время на 180 сек назад (больше лимита 120)
-        accounts[u] = time.time() - 180
-        logger(f"🧪 ТЕСТ: Имитация вылета {u}.")
-        await m.answer(f"🧪 Имитация вылета <b>{u}</b> запущена (ждем монитор).", parse_mode="HTML")
+    u = m.text.split()[1] if len(m.text.split()) > 1 else None
+    if u and u in accounts:
+        accounts[u] = time.time() - 150 # Имитируем простой > 120 сек
+        await m.answer(f"🧪 Тест: Дисконнект {u} имитирован. Ждем проверку монитора.")
     else:
-        await m.answer("Аккаунт не в сети, сначала используй /testadd")
+        await m.answer("Аккаунт не найден в активных.")
 
-# --- Логика Уведомлений ---
+# --- Логика Панели ---
+def get_status_text():
+    now = time.time()
+    res = f"<b>🐝 Статус Улья BSS</b>\n🕒 {time.strftime('%H:%M:%S')} | 🔄 Рестартов: {session_restarts}\n\n"
+    
+    # ДОБАВЛЕНА ЦИТАТА В ПАНЕЛЬ
+    res += "<blockquote>"
+    if not accounts: 
+        res += "Аккаунты офлайн..."
+    else:
+        for u in sorted(accounts.keys()):
+            dur = int(now - start_times.get(u, now))
+            res += f"🟢 <code>{u}</code> | <b>{dur//3600}ч {(dur%3600)//60}м</b>\n"
+    res += "</blockquote>"
+    return res
+
+async def refresh_panels():
+    text = get_status_text()
+    for cid, mid in list(status_messages.items()):
+        if last_text.get(str(cid)) == text: continue
+        try:
+            await bot.edit_message_text(
+                chat_id=str(cid), 
+                message_id=int(mid), 
+                text=text, 
+                parse_mode="HTML", 
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Сбросить рестарты за сессию", callback_data="ask_reset")]])
+            )
+            last_text[str(cid)] = text
+        except Exception as e:
+            if "not modified" not in str(e).lower(): logger(f"Update error: {e}")
+
+# --- Мониторинг ---
 async def monitor():
     while True:
         now = time.time()
@@ -110,7 +124,7 @@ async def monitor():
                     for cid in status_messages:
                         try: await bot.send_message(cid, msg_text, parse_mode="HTML")
                         except: pass
-                accounts.pop(u); start_times.pop(u, None)
+                accounts.pop(u, None); start_times.pop(u, None)
         await refresh_panels(); await save_data(); await asyncio.sleep(30)
 
 # --- Рассылка /Update ---
@@ -197,25 +211,7 @@ async def broadcast_done(cb: types.CallbackQuery, state: FSMContext):
 async def cancel_upd(cb: types.CallbackQuery, state: FSMContext):
     await state.clear(); await cb.message.answer("Отменено."); await cb.answer()
 
-# --- Базовый Функционал ---
-def get_status_text():
-    now = time.time()
-    res = f"<b>🐝 Статус Улья BSS</b>\n🕒 {time.strftime('%H:%M:%S')} | 🔄 Рестартов: {session_restarts}\n\n"
-    if not accounts: res += "<i>Аккаунты офлайн...</i>"
-    for u in sorted(accounts.keys()):
-        dur = int(now - start_times.get(u, now))
-        res += f"🟢 <code>{u}</code> | <b>{dur//3600}ч {(dur%3600)//60}м</b>\n"
-    return res
-
-async def refresh_panels():
-    text = get_status_text()
-    for cid, mid in list(status_messages.items()):
-        if last_text.get(str(cid)) == text: continue
-        try:
-            await bot.edit_message_text(text, str(cid), int(mid), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Сбросить рестарты за сессию", callback_data="ask_reset")]]))
-            last_text[str(cid)] = text
-        except: pass
-
+# --- Базовые команды ---
 @dp.message(Command("start"))
 async def cmd_start(m: types.Message):
     await m.answer(f"<b>Бот Улья</b>\nОбщих рестартов: {total_restarts}", parse_mode="HTML")
@@ -251,6 +247,7 @@ async def c_add(m: types.Message):
     notifications.setdefault(args[1], []).append(f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}")
     await save_data(); await m.answer("✅ Добавлено")
 
+# --- Потоки и Сигналы ---
 async def handle_signal(request):
     try:
         data = await request.json(); u = data.get("username")
