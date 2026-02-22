@@ -4,6 +4,7 @@ import time
 import json
 import random
 import logging
+import sys
 import redis.asyncio as redis
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -12,9 +13,23 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiohttp import web
 
-# --- Настройка логирования ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-logger = logging.getLogger("BSS_STABLE")
+# --- Настройка "спокойного" логирования ---
+log_format = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+# INFO и ниже — в обычный поток (белый текст)
+stdout_handler = logging.StreamHandler(sys.stdout)
+stdout_handler.setLevel(logging.INFO)
+stdout_handler.setFormatter(log_format)
+
+# ERROR и выше — в поток ошибок (может быть красным)
+stderr_handler = logging.StreamHandler(sys.stderr)
+stderr_handler.setLevel(logging.ERROR)
+stderr_handler.setFormatter(log_format)
+
+logger = logging.getLogger("BSS_PRO")
+logger.setLevel(logging.INFO)
+logger.addHandler(stdout_handler)
+logger.addHandler(stderr_handler)
 
 # --- Конфигурация ---
 TOKEN = os.getenv("BOT_TOKEN")
@@ -62,12 +77,12 @@ async def load_data():
             saved_accounts = data.get("accounts", {})
             now = time.time()
             for u, l_ping in saved_accounts.items():
-                if now - float(l_ping) < 120: # Если бот рестартнулся быстро
+                if now - float(l_ping) < 120:
                     accounts[u] = float(l_ping)
                     if u in saved_starts: start_times[u] = float(saved_starts[u])
-            logger.info(f"✅ Данные восстановлены. Рестарт сессии: {session_restarts}")
+            logger.info(f"Данные из базы подтянуты. Рестарт №{total_restarts}")
     except Exception as e:
-        logger.error(f"Ошибка БД: {e}")
+        logger.error(f"Критическая ошибка БД: {e}")
 
 async def save_data():
     if not db: return
@@ -80,11 +95,11 @@ async def save_data():
         await db.set("BSS_V37_STABLE_FINAL", json.dumps(data))
     except: pass
 
-# --- Логика Панели ---
+# --- Интерфейс ---
 def get_status_text():
     now = time.time()
     text = f"<b>🐝 Состояние Улья BSS</b>\n"
-    text += f"🕒 {time.strftime('%H:%M:%S')} | 🔄 Рестартов: {session_restarts}\n\n"
+    text += f"🕒 {time.strftime('%H:%M:%S')} | 🔄 Сессия: {session_restarts}\n\n"
     text += "<blockquote>"
     if not accounts:
         text += "<i>Ожидание сигналов...</i>"
@@ -107,18 +122,21 @@ async def refresh_panels():
             await bot.edit_message_text(chat_id=str(cid), message_id=int(mid), text=text, parse_mode="HTML", reply_markup=kb)
             last_text[str(cid)] = text
         except Exception as e:
-            if "not modified" not in str(e).lower(): logger.error(f"Ошибка обновления {cid}: {e}")
+            if "not modified" not in str(e).lower(): logger.warning(f"Панель {cid} не обновлена: {e}")
 
 # --- Команды ---
 @dp.message(Command("start"))
 async def cmd_start(m: types.Message):
     await m.answer(
-        "<b>🐝 Улей v51 Stable</b>\n\n"
+        f"<b>🐝 Улей BSS v52</b>\n\n"
+        f"🔄 Рестартов в этой сессии: <b>{session_restarts}</b>\n"
+        f"📊 Всего рестартов: <b>{total_restarts}</b>\n\n"
+        "Команды:\n"
         "/information - Панель\n"
         "/add [Ник] [Тег] - Пинг\n"
-        "/list - Твои пинги\n"
-        "/Update - Рассылка (Админ)\n"
-        "/testdisconect [Ник] - Тест", parse_mode="HTML"
+        "/remove [Ник] [Тег] - Удалить\n"
+        "/list - Все подписки\n"
+        "/Update - Рассылка", parse_mode="HTML"
     )
 
 @dp.message(Command("information"))
@@ -136,19 +154,37 @@ async def cmd_info(m: types.Message):
 @dp.message(Command("add"))
 async def cmd_add(m: types.Message):
     args = m.text.split()
-    if len(args) < 2: return await m.answer("Укажи ник! Можно так: <code>/add Player1 @ivan</code>", parse_mode="HTML")
+    if len(args) < 2: return await m.answer("Формат: <code>/add Ник @тег</code>", parse_mode="HTML")
     acc = args[1]
     tag = args[2] if len(args) > 2 else (f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}")
     notifications.setdefault(acc, [])
-    if tag not in notifications[acc]: notifications[acc].append(tag)
-    await save_data()
-    await m.answer(f"✅ Пинг для <b>{acc}</b> на <b>{tag}</b> добавлен", parse_mode="HTML")
+    if tag not in notifications[acc]: 
+        notifications[acc].append(tag)
+        await save_data()
+        await m.answer(f"✅ Пинг для <b>{acc}</b> на <b>{tag}</b> добавлен.", parse_mode="HTML")
+    else:
+        await m.answer("Этот пинг уже есть в списке.")
+
+@dp.message(Command("remove", "delete"))
+async def cmd_remove(m: types.Message):
+    args = m.text.split()
+    if len(args) < 2: return await m.answer("Укажи ник!")
+    acc = args[1]
+    tag = args[2] if len(args) > 2 else (f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}")
+    
+    if acc in notifications and tag in notifications[acc]:
+        notifications[acc].remove(tag)
+        if not notifications[acc]: del notifications[acc]
+        await save_data()
+        await m.answer(f"❌ Пинг <b>{tag}</b> удален для <b>{acc}</b>", parse_mode="HTML")
+    else:
+        await m.answer("Пинг не найден в списке.")
 
 @dp.message(Command("list"))
 async def cmd_list(m: types.Message):
     if not notifications: return await m.answer("Список пингов пуст.")
     res = "<b>📜 Настройки пингов:</b>\n"
-    for acc, tags in notifications.items():
+    for acc, tags in sorted(notifications.items()):
         res += f"• <code>{acc}</code>: {', '.join(tags)}\n"
     await m.answer(res, parse_mode="HTML")
 
@@ -156,9 +192,13 @@ async def cmd_list(m: types.Message):
 async def cmd_test(m: types.Message):
     if m.from_user.username != ALLOWED_ADMIN: return
     args = m.text.split()
-    if len(args) > 1 and args[1] in accounts:
-        accounts[args[1]] = time.time() - 200
-        await m.answer(f"🧪 Тест вылета <code>{args[1]}</code> запущен...", parse_mode="HTML")
+    if len(args) > 1:
+        target = args[1]
+        if target in accounts:
+            accounts[target] = time.time() - 300 # Ставим время "давно назад"
+            await m.answer(f"🧪 Имитация вылета <code>{target}</code> начата.\n<i>Сообщение придет в течение 30 секунд.</i>", parse_mode="HTML")
+        else:
+            await m.answer(f"Аккаунт <code>{target}</code> сейчас не в сети.", parse_mode="HTML")
 
 # --- Рассылка /Update ---
 @dp.message(Command("Update"))
@@ -171,9 +211,9 @@ async def cmd_update(m: types.Message, state: FSMContext):
 @dp.callback_query(F.data.startswith("u_"))
 async def u_choice(cb: types.CallbackQuery, state: FSMContext):
     if cb.data == "u_t":
-        await state.set_state(PostCreation.waiting_for_title); await cb.message.answer("Заголовок:")
+        await state.set_state(PostCreation.waiting_for_title); await cb.message.answer("Введите заголовок:")
     else:
-        await state.set_state(PostCreation.waiting_for_content); await cb.message.answer("Текст:")
+        await state.set_state(PostCreation.waiting_for_content); await cb.message.answer("Введите текст новости:")
     await cb.answer()
 
 @dp.message(PostCreation.waiting_for_title, F.text | F.photo)
@@ -185,7 +225,7 @@ async def collect(m: types.Message, state: FSMContext):
     txt = m.html_text or m.caption
     st = await state.get_state()
     if st == PostCreation.waiting_for_title:
-        await state.update_data(title=txt.upper()); await state.set_state(PostCreation.waiting_for_desc); await m.answer("Описание:")
+        await state.update_data(title=txt.upper()); await state.set_state(PostCreation.waiting_for_desc); await m.answer("Теперь описание:")
     else:
         d = await state.get_data(); final = f"📢 <b>{d.get('title')}</b>\n\n{txt}" if d.get('title') else f"📢 {txt}"
         await state.update_data(full_text=final)
@@ -207,12 +247,12 @@ async def go_send(cb: types.CallbackQuery, state: FSMContext):
             elif len(photos) == 1: await bot.send_photo(cid, photos[0], caption=text, parse_mode="HTML")
             else: await bot.send_media_group(cid, [InputMediaPhoto(media=p, caption=text if i==0 else "", parse_mode="HTML") for i, p in enumerate(photos)])
         except: pass
-    await cb.message.answer("🚀 Разослано!"); await state.clear(); await cb.answer()
+    await cb.message.answer("🚀 Готово!"); await state.clear(); await cb.answer()
 
-# --- Сигналы и Монитор ---
+# --- Логика Сервера ---
 @dp.callback_query(F.data == "ask_reset")
 async def ask_res(cb: types.CallbackQuery):
-    await cb.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚠️ ПОДТВЕРДИТЬ", callback_data="confirm_reset")]]))
+    await cb.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚠️ ТЫ УВЕРЕН?", callback_data="confirm_reset")]]))
 
 @dp.callback_query(F.data == "confirm_reset")
 async def conf_res(cb: types.CallbackQuery):
@@ -225,24 +265,29 @@ async def handle_signal(request):
             now = time.time()
             if u not in start_times: start_times[u] = now
             accounts[u] = now
-            asyncio.create_task(refresh_panels()); return web.Response(text="OK")
+            return web.Response(text="OK")
     except: pass
     return web.Response(status=400)
 
 async def monitor():
     while True:
-        now = time.time()
-        for u in list(accounts.keys()):
-            if now - accounts[u] > 120:
-                if u in notifications:
-                    tags = " ".join(notifications[u])
-                    for cid in status_messages:
-                        try: await bot.send_message(cid, f"🚨 <b>{u}</b> ВЫЛЕТЕЛ!\n{tags}", parse_mode="HTML")
-                        except: pass
-                accounts.pop(u, None); start_times.pop(u, None)
-        await refresh_panels(); await save_data(); await asyncio.sleep(30)
+        try:
+            now = time.time()
+            for u in list(accounts.keys()):
+                if now - accounts[u] > 120:
+                    if u in notifications:
+                        tags = " ".join(notifications[u])
+                        for cid in status_messages:
+                            try: await bot.send_message(cid, f"🚨 <b>{u}</b> ВЫЛЕТЕЛ!\n{tags}", parse_mode="HTML")
+                            except: pass
+                    accounts.pop(u, None); start_times.pop(u, None)
+            await refresh_panels(); await save_data()
+        except Exception as e:
+            logger.error(f"Ошибка монитора: {e}")
+        await asyncio.sleep(30)
 
 async def main():
+    logger.info("Бот запускается...")
     await load_data(); asyncio.create_task(monitor())
     app = web.Application(); app.router.add_post('/signal', handle_signal)
     runner = web.AppRunner(app); await runner.setup()
@@ -250,4 +295,5 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
-if __name__ == "__main__": asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
