@@ -20,14 +20,9 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 db = None
 
-# Глобальные переменные
-accounts = {}      
-start_times = {}   
-notifications = {} 
-status_messages = {}
-total_restarts = 0     
-session_restarts = 0   
-last_text = {} 
+# Состояние в памяти
+accounts, start_times, notifications, status_messages, last_text = {}, {}, {}, {}, {}
+total_restarts, session_restarts = 0, 0
 
 def logger(msg):
     print(f"DEBUG [{time.strftime('%H:%M:%S')}]: {msg}")
@@ -38,7 +33,7 @@ class PostCreation(StatesGroup):
     waiting_for_desc = State()
     waiting_for_confirm = State()
 
-# --- База Данных ---
+# --- База Данных (ВОЗВРАТ СТАРОЙ ЛОГИКИ) ---
 async def load_data():
     global db, notifications, status_messages, total_restarts, session_restarts, start_times
     if not REDIS_URL: return
@@ -47,15 +42,20 @@ async def load_data():
         raw = await db.get("BSS_V37_STABLE_FINAL")
         if raw:
             data = json.loads(raw)
+            # Обновляем словари, не затирая их новыми пустыми
             notifications.update(data.get("notifs", {}))
             status_messages.update(data.get("msgs", {}))
+            # Сохраняем счетчик
             total_restarts = data.get("restarts", 0) + 1
-            session_restarts = data.get("session_restarts", 0) + 1
+            session_restarts = 0 # Сессия всегда с 0 при рестарте кода
+            
             saved_starts = data.get("starts", {})
             for k, v in saved_starts.items(): start_times[k] = float(v)
-            logger(f"✅ Данные загружены. Общих рестартов: {total_restarts}")
+            logger(f"✅ Данные из БАЗЫ подтянуты. Рестартов: {total_restarts}")
+        else:
+            logger("⚠️ База пуста или ключ не найден.")
     except Exception as e:
-        logger(f"Ошибка БД: {e}")
+        logger(f"❌ Критическая ошибка БД: {e}")
 
 async def save_data():
     if not db: return
@@ -68,74 +68,66 @@ async def save_data():
             "starts": start_times 
         }
         await db.set("BSS_V37_STABLE_FINAL", json.dumps(data))
-    except: pass
+    except Exception as e:
+        logger(f"Ошибка сохранения: {e}")
 
-# --- Панель ---
+# --- Логика Панели ---
 def get_status_text():
     now = time.time()
     res = f"<b>🐝 Статус Улья BSS</b>\n🕒 {time.strftime('%H:%M:%S')} | 🔄 Рестартов: {session_restarts}\n\n"
     res += "<blockquote>"
     if not accounts:
-        res += "Ожидание сигналов от аккаунтов..."
+        res += "Ожидание сигналов..."
     else:
         for u in sorted(accounts.keys()):
             s_time = start_times.get(u, now)
             dur = int(now - s_time)
-            h, m = dur//3600, (dur%3600)//60
-            res += f"🟢 <code>{u}</code> | <b>{h}ч {m}м</b>\n"
+            res += f"🟢 <code>{u}</code> | <b>{dur//3600}ч {(dur%3600)//60}м</b>\n"
     res += "</blockquote>"
     return res
 
 async def refresh_panels():
-    text = get_status_text()
+    new_text = get_status_text()
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Сбросить рестарты", callback_data="ask_reset")]])
+    
     for cid, mid in list(status_messages.items()):
-        if last_text.get(str(cid)) == text: continue
+        # Если текст не изменился — пропускаем
+        if last_text.get(str(cid)) == new_text:
+            continue
+            
         try:
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Сбросить рестарты", callback_data="ask_reset")]])
-            await bot.edit_message_text(text, str(cid), int(mid), parse_mode="HTML", reply_markup=kb)
-            last_text[str(cid)] = text
-        except: pass
+            await bot.edit_message_text(
+                text=new_text,
+                chat_id=str(cid),
+                message_id=int(mid),
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+            last_text[str(cid)] = new_text
+        except Exception as e:
+            if "message is not modified" in str(e).lower():
+                last_text[str(cid)] = new_text # Синхронизируем, если вдруг текст совпал
+            else:
+                logger(f"Ошибка обновления панели {cid}: {e}")
 
-# --- Команды управления ---
-@dp.message(Command("start"))
-async def cmd_start(m: types.Message):
-    help_text = (
-        "<b>🐝 Бот мониторинга Улья</b>\n\n"
-        "📊 <b>Общие команды:</b>\n"
-        "/information - Вызвать панель статуса\n"
-        "/add [ник] - Подписаться на уведомления о вылете\n"
-        "/remove [ник] - Отписаться от уведомлений\n"
-        "/list - Список ваших подписок\n\n"
-        "📢 <b>Для админа:</b>\n"
-        "/Update - Рассылка (текст/фото/цитаты)\n"
-        "/testdisconect [ник] - Тест вылета\n\n"
-        f"📈 <i>Всего рестартов за всё время: {total_restarts}</i>"
-    )
-    await m.answer(help_text, parse_mode="HTML")
-
+# --- Управление Пингами ---
 @dp.message(Command("add"))
 async def cmd_add(m: types.Message):
     args = m.text.split()
-    if len(args) < 2:
-        return await m.answer("⚠️ Укажи ник аккаунта. Пример: <code>/add Player1</code>", parse_mode="HTML")
-    
+    if len(args) < 2: return await m.answer("Укажи ник!")
     acc = args[1]
     tag = f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}"
     
-    if acc not in notifications: notifications[acc] = []
+    notifications.setdefault(acc, [])
     if tag not in notifications[acc]:
         notifications[acc].append(tag)
         await save_data()
-        await m.answer(f"✅ Ты подписан на уведомления от <b>{acc}</b>", parse_mode="HTML")
-    else:
-        await m.answer(f"ℹ️ Ты уже подписан на <b>{acc}</b>", parse_mode="HTML")
+        await m.answer(f"✅ Пинг на <b>{acc}</b> включен.", parse_mode="HTML")
 
 @dp.message(Command("remove", "delete"))
 async def cmd_remove(m: types.Message):
     args = m.text.split()
-    if len(args) < 2:
-        return await m.answer("⚠️ Укажи ник. Пример: <code>/remove Player1</code>", parse_mode="HTML")
-    
+    if len(args) < 2: return
     acc = args[1]
     tag = f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}"
     
@@ -143,30 +135,28 @@ async def cmd_remove(m: types.Message):
         notifications[acc].remove(tag)
         if not notifications[acc]: del notifications[acc]
         await save_data()
-        await m.answer(f"❌ Ты отписался от уведомлений <b>{acc}</b>", parse_mode="HTML")
-    else:
-        await m.answer(f"❓ Ты не был подписан на <b>{acc}</b>", parse_mode="HTML")
+        await m.answer(f"❌ Пинг на <b>{acc}</b> выключен.", parse_mode="HTML")
 
 @dp.message(Command("list"))
 async def cmd_list(m: types.Message):
-    tag = f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}"
-    my_subs = [acc for acc, tags in notifications.items() if tag in tags]
+    if not notifications:
+        return await m.answer("Список настроек пуст.")
     
-    if not my_subs:
-        return await m.answer("📜 У тебя пока нет активных подписок.")
+    res = "<b>Настройки пингов:</b>\n"
+    for acc, tags in notifications.items():
+        res += f"• <code>{acc}</code>: {', '.join(tags)}\n"
     
-    res = "<b>📜 Твои подписки:</b>\n" + "\n".join([f"• <code>{a}</code>" for a in my_subs])
     await m.answer(res, parse_mode="HTML")
 
-# --- Монитор и Пинги ---
+# --- Мониторинг ---
 async def monitor():
     while True:
         now = time.time()
         for u in list(accounts.keys()):
-            if now - accounts[u] > 120: # 2 минуты
+            if now - accounts[u] > 120:
                 if u in notifications:
                     tags = " ".join(notifications[u])
-                    msg = f"🚨 <b>ВЫЛЕТ АККАУНТА!</b>\n\n<blockquote>👤 Аккаунт: <code>{u}</code>\n🔔 Пинг: {tags}</blockquote>"
+                    msg = f"🚨 <b>ВЫЛЕТ!</b>\n\n<blockquote>👤 <code>{u}</code>\n🔔 {tags}</blockquote>"
                     for cid in status_messages:
                         try: await bot.send_message(cid, msg, parse_mode="HTML")
                         except: pass
@@ -176,8 +166,19 @@ async def monitor():
         await save_data()
         await asyncio.sleep(30)
 
-# --- Остальной функционал (Update, Тесты, Сигналы) ---
-# (Код /Update, /testdisconect и Web-сервера остается таким же надежным)
+# --- Остальные команды ---
+@dp.message(Command("start"))
+async def cmd_start(m: types.Message):
+    await m.answer(
+        "<b>🐝 Бот Улья BSS</b>\n\n"
+        "/information - Панель\n"
+        "/add [ник] - Пинг\n"
+        "/remove [ник] - Удалить пинг\n"
+        "/list - Все настройки\n"
+        "/Update - Рассылка\n\n"
+        f"📊 Всего рестартов: {total_restarts}", 
+        parse_mode="HTML"
+    )
 
 @dp.message(Command("information"))
 async def cmd_info(m: types.Message):
@@ -193,7 +194,7 @@ async def cmd_info(m: types.Message):
 
 @dp.callback_query(F.data == "ask_reset")
 async def ask_res(cb: types.CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚠️ ПОДТВЕРДИТЬ СБРОС", callback_data="confirm_reset")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚠️ ТЫ УВЕРЕН?", callback_data="confirm_reset")]])
     await cb.message.edit_reply_markup(reply_markup=kb)
     await asyncio.sleep(5)
     try: await cb.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Сбросить рестарты", callback_data="ask_reset")]]))
@@ -203,7 +204,7 @@ async def ask_res(cb: types.CallbackQuery):
 async def conf_res(cb: types.CallbackQuery):
     global session_restarts
     session_restarts = 0
-    await save_data(); await cb.answer("Рестарты сессии сброшены!"); await refresh_panels()
+    await save_data(); await cb.answer("Готово!"); await refresh_panels()
 
 @dp.message(Command("testdisconect"))
 async def cmd_td(m: types.Message):
@@ -211,44 +212,41 @@ async def cmd_td(m: types.Message):
     args = m.text.split()
     if len(args) > 1 and args[1] in accounts:
         accounts[args[1]] = time.time() - 150
-        await m.answer(f"🧪 Имитация вылета {args[1]}...")
+        await m.answer(f"🧪 Тест вылета {args[1]} запущен.")
 
+# --- Рассылка (Update) ---
 @dp.message(Command("Update"))
 async def cmd_update(m: types.Message, state: FSMContext):
     if m.from_user.username != ALLOWED_ADMIN: return
     await state.set_data({"photos": []})
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📝 С названием", callback_data="u_t"), InlineKeyboardButton(text="📄 Без", callback_data="u_s")]])
-    await m.answer("<b>Создание рассылки:</b>", reply_markup=kb, parse_mode="HTML")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📝 Название", callback_data="u_t"), InlineKeyboardButton(text="📄 Без", callback_data="u_s")]])
+    await m.answer("Тип рассылки:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("u_"))
 async def u_choice(cb: types.CallbackQuery, state: FSMContext):
     if cb.data == "u_t":
         await state.set_state(PostCreation.waiting_for_title)
-        await cb.message.answer("Введите заголовок:")
+        await cb.message.answer("Заголовок:")
     else:
         await state.set_state(PostCreation.waiting_for_content)
-        await cb.message.answer("Введите текст:")
+        await cb.message.answer("Текст:")
     await cb.answer()
 
 @dp.message(PostCreation.waiting_for_title, F.text | F.photo)
 @dp.message(PostCreation.waiting_for_content, F.text | F.photo)
 @dp.message(PostCreation.waiting_for_desc, F.text | F.photo)
 async def collect(m: types.Message, state: FSMContext):
-    data = await state.get_data()
-    photos = data.get("photos", [])
+    d = await state.get_data(); photos = d.get("photos", [])
     if m.photo: photos.append(m.photo[-1].file_id); await state.update_data(photos=photos)
     txt = m.html_text or m.caption
     st = await state.get_state()
-    
     if st == PostCreation.waiting_for_title:
-        await state.update_data(title=txt.upper())
-        await state.set_state(PostCreation.waiting_for_desc)
-        await m.answer("Введите описание:")
+        await state.update_data(title=txt.upper()); await state.set_state(PostCreation.waiting_for_desc)
+        await m.answer("Описание:")
     else:
         d = await state.get_data()
         final = f"📢 <b>{d.get('title')}</b>\n\n{txt}" if d.get('title') else f"📢 {txt}"
         await state.update_data(full_text=final)
-        # Превью и кнопки отправки...
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ ОТПРАВИТЬ", callback_data="go"), InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="no")]])
         if photos:
             if len(photos) == 1: await m.answer_photo(photos[0], caption=final, parse_mode="HTML", reply_markup=kb)
@@ -269,12 +267,13 @@ async def go_send(cb: types.CallbackQuery, state: FSMContext):
                 media = [InputMediaPhoto(media=photos[0], caption=text, parse_mode="HTML")] + [InputMediaPhoto(media=p) for p in photos[1:]]
                 await bot.send_media_group(cid, media)
         except: pass
-    await cb.message.answer("🚀 Разослано!"); await state.clear(); await cb.answer()
+    await cb.message.answer("🚀 Готово!"); await state.clear(); await cb.answer()
 
 @dp.callback_query(F.data == "no")
 async def no_send(cb: types.CallbackQuery, state: FSMContext):
     await state.clear(); await cb.message.answer("Отменено."); await cb.answer()
 
+# --- Сигналы ---
 async def handle_signal(request):
     try:
         data = await request.json(); u = data.get("username")
