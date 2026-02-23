@@ -80,6 +80,7 @@ async def load_data():
                 if now - float(l_ping) < 120:
                     accounts[u] = float(l_ping)
                     if u in saved_starts: start_times[u] = float(saved_starts[u])
+        logger.info("Данные загружены из БД.")
     except Exception as e:
         logger.error(f"Ошибка БД: {e}")
 
@@ -119,100 +120,105 @@ async def refresh_panels():
 # --- API Роблокс (Аватарки) ---
 async def get_roblox_avatar(username, session):
     try:
-        # Получаем ID игрока по нику
+        logger.info(f"Запрос ID для {username}...")
         async with session.post("https://users.roblox.com/v1/usernames/users", json={"usernames": [username], "excludeBannedUsers": False}) as resp:
+            if resp.status != 200:
+                logger.warning(f"Роблокс вернул код {resp.status} для юзера {username}")
+                return None
             data = await resp.json()
             if not data.get("data"): return None
             user_id = data["data"][0]["id"]
         
-        # Получаем URL аватарки (голова)
+        logger.info(f"Запрос миниатюры для ID {user_id}...")
         url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=150x150&format=Png&isCircular=true"
         async with session.get(url) as resp:
+            if resp.status != 200: return None
             data = await resp.json()
             if not data.get("data"): return None
             img_url = data["data"][0]["imageUrl"]
         
-        # Скачиваем саму картинку
+        logger.info(f"Скачивание картинки для {username}...")
         async with session.get(img_url) as resp:
-            img_bytes = await resp.read()
-            return Image.open(io.BytesIO(img_bytes)).convert("RGBA")
-    except:
+            if resp.status == 200:
+                img_bytes = await resp.read()
+                return Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+            return None
+    except Exception as e:
+        logger.error(f"Ошибка API Роблокс для {username}: {e}", exc_info=True)
         return None
 
 # --- Генерация Картинки ---
 async def generate_status_image(target_accounts, is_online_mode=True):
-    width = 600
-    row_height = 80
-    header_height = 100
-    footer_height = 80
-    height = header_height + (len(target_accounts) * row_height) + footer_height
-    if len(target_accounts) == 0: height = header_height + row_height + footer_height
+    logger.info(f"Старт генерации картинки. Аккаунты: {target_accounts}, Онлайн-режим: {is_online_mode}")
+    width, row_height, header_height, footer_height = 600, 80, 100, 80
+    height = header_height + (max(1, len(target_accounts)) * row_height) + footer_height
 
-    # Пытаемся загрузить фон
-    img = Image.new("RGBA", (width, height), (30, 30, 30, 255))
+    img = Image.new("RGBA", (width, height), (40, 44, 52, 255))
+    
+    # Фон
     try:
+        logger.info("Скачиваем случайный фон...")
         async with aiohttp.ClientSession() as session:
-            async with session.get(random.choice(BG_URLS)) as resp:
-                bg_bytes = await resp.read()
-                bg = Image.open(io.BytesIO(bg_bytes)).convert("RGBA")
-                bg = bg.resize((width, height))
-                img.paste(bg, (0, 0))
-    except: pass # Если не вышло, останется серый фон
+            async with session.get(random.choice(BG_URLS), timeout=5) as resp:
+                if resp.status == 200:
+                    bg_bytes = await resp.read()
+                    bg = Image.open(io.BytesIO(bg_bytes)).convert("RGBA")
+                    bg = bg.resize((width, height))
+                    img.paste(bg, (0, 0))
+                    logger.info("Фон успешно наложен.")
+                else: logger.warning(f"Не удалось скачать фон (код {resp.status})")
+    except Exception as e: logger.error(f"Ошибка загрузки фона: {e}")
 
     draw = ImageDraw.Draw(img)
-    # Попытка использовать дефолтный шрифт (или подгрузить встроенный)
-    try: font_large = ImageFont.truetype("arial.ttf", 36)
-    except: font_large = ImageFont.load_default()
-    try: font_medium = ImageFont.truetype("arial.ttf", 24)
-    except: font_medium = ImageFont.load_default()
-    try: font_small = ImageFont.truetype("arial.ttf", 18)
-    except: font_small = ImageFont.load_default()
+    font_large = font_medium = font_small = ImageFont.load_default()
+    
+    try:
+        font_large = ImageFont.truetype("arial.ttf", 36)
+        font_medium = ImageFont.truetype("arial.ttf", 24)
+        font_small = ImageFont.truetype("arial.ttf", 18)
+    except: logger.warning("Шрифт arial.ttf не найден. Используется базовый шрифт Pillow.")
 
-    # Заголовок
     title = "🐝 Текущий онлайн макросов" if is_online_mode else "🚀 Будут стоять на макросе"
     draw.text((30, 30), title, font=font_large, fill=(255, 255, 255, 255))
 
     if not target_accounts:
         draw.text((30, header_height + 20), "Никого нет в сети...", font=font_medium, fill=(200, 200, 200, 255))
     else:
-        async with aiohttp.ClientSession() as session:
-            now = time.time()
-            for i, acc in enumerate(target_accounts):
-                y_pos = header_height + (i * row_height)
-                
-                # Плашка под аккаунт
-                draw.rectangle([20, y_pos, width-20, y_pos+row_height-10], fill=(0, 0, 0, 150), radius=10)
-                
-                # Скачиваем аватарку
-                avatar = await get_roblox_avatar(acc, session)
-                if avatar:
-                    avatar = avatar.resize((50, 50))
-                    img.paste(avatar, (30, y_pos + 10), avatar)
-                
-                # Текст (Ник)
-                draw.text((95, y_pos + 20), acc, font=font_medium, fill=(255, 255, 255, 255))
-                
-                # Текст (Статус/Время)
-                if is_online_mode:
-                    s_time = start_times.get(acc, now)
-                    dur = int(now - s_time)
-                    status_text = f"{dur//3600}h {(dur%3600)//60}m {dur%60}s"
-                    draw.text((width - 180, y_pos + 20), status_text, font=font_medium, fill=(100, 255, 100, 255))
-                else:
-                    draw.text((width - 150, y_pos + 20), "Ожидается", font=font_medium, fill=(255, 200, 100, 255))
+        try:
+            async with aiohttp.ClientSession() as session:
+                now = time.time()
+                for i, acc in enumerate(target_accounts):
+                    y_pos = header_height + (i * row_height)
+                    draw.rectangle([20, y_pos, width-20, y_pos+row_height-10], fill=(0, 0, 0, 180), radius=10)
+                    
+                    avatar = await get_roblox_avatar(acc, session)
+                    if avatar:
+                        avatar = avatar.resize((50, 50))
+                        img.paste(avatar, (30, y_pos + 10), avatar)
+                    else: logger.warning(f"Аватар для {acc} не был наложен (отсутствует).")
+                    
+                    draw.text((95, y_pos + 20), acc, font=font_medium, fill=(255, 255, 255, 255))
+                    
+                    if is_online_mode:
+                        dur = int(now - start_times.get(acc, now))
+                        status_text = f"{dur//3600}h {(dur%3600)//60}m {dur%60}s"
+                        draw.text((width - 180, y_pos + 20), status_text, font=font_medium, fill=(100, 255, 100, 255))
+                    else:
+                        draw.text((width - 150, y_pos + 20), "Ожидается", font=font_medium, fill=(255, 200, 100, 255))
+        except Exception as e: logger.error(f"Ошибка рендера строк таблицы: {e}", exc_info=True)
 
-    # Цитата
     draw.text((30, height - 50), random.choice(QUOTES), font=font_small, fill=(200, 200, 200, 255))
 
     img_byte_arr = io.BytesIO()
     img.save(img_byte_arr, format='PNG')
+    logger.info("Картинка успешно сгенерирована!")
     return img_byte_arr.getvalue()
 
 # --- Команды ---
 @dp.message(Command("start", "information"))
 async def cmd_info(m: types.Message):
     if m.text.startswith("/start"):
-        await m.answer(f"<b>🐝 Улей BSS v53</b>\nРестартов сессии: {session_restarts}\nВсего: {total_restarts}\n\n/img - Сгенерировать карточку\n/testdisconect [Ник] - Тест", parse_mode="HTML")
+        await m.answer(f"<b>🐝 Улей BSS v54</b>\nРестартов сессии: {session_restarts}\nВсего: {total_restarts}\n\n/img - Сгенерировать карточку\n/testdisconect [Ник] - Тест", parse_mode="HTML")
     cid = str(m.chat.id)
     if cid in status_messages:
         try: await bot.delete_message(chat_id=cid, message_id=status_messages[cid])
@@ -223,37 +229,70 @@ async def cmd_info(m: types.Message):
     except: pass
     await save_data()
 
-@dp.message(Command("add", "remove", "list"))
+# ИСПРАВЛЕНИЕ: Вынес /list в отдельную функцию!
+@dp.message(Command("list"))
+async def cmd_list(m: types.Message):
+    if not notifications: return await m.answer("Список пингов пуст.")
+    res = "<b>📜 Настройки пингов:</b>\n"
+    for acc, tags in sorted(notifications.items()):
+        res += f"• <code>{acc}</code>: {', '.join(tags)}\n"
+    await m.answer(res, parse_mode="HTML")
+
+@dp.message(Command("add", "remove", "delete"))
 async def cmd_ping_settings(m: types.Message):
-    cmd = m.text.split()[0].lower()
-    if cmd == "/list":
-        if not notifications: return await m.answer("Список пингов пуст.")
-        return await m.answer("<b>📜 Пинги:</b>\n" + "".join([f"• <code>{k}</code>: {', '.join(v)}\n" for k,v in notifications.items()]), parse_mode="HTML")
-    
+    cmd = m.text.split()[0].split('@')[0].lower()
     args = m.text.split()
-    if len(args) < 2: return await m.answer("Укажи ник!")
+    if len(args) < 2: return await m.answer("Укажи ник! Формат: <code>/add Player1 @тег</code>", parse_mode="HTML")
+    
     acc = args[1]
     tag = args[2] if len(args) > 2 else (f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}")
     
     notifications.setdefault(acc, [])
-    if cmd == "/add" and tag not in notifications[acc]:
-        notifications[acc].append(tag); await save_data(); await m.answer(f"✅ Добавлен пинг: {acc} -> {tag}")
-    elif cmd in ["/remove", "/delete"] and tag in notifications[acc]:
-        notifications[acc].remove(tag)
-        if not notifications[acc]: del notifications[acc]
-        await save_data(); await m.answer(f"❌ Пинг удален: {acc} -> {tag}")
+    if cmd == "/add":
+        if tag not in notifications[acc]: notifications[acc].append(tag); await save_data()
+        await m.answer(f"✅ Добавлен пинг: <b>{acc}</b> -> <b>{tag}</b>", parse_mode="HTML")
+    elif cmd in ["/remove", "/delete"]:
+        if tag in notifications[acc]:
+            notifications[acc].remove(tag)
+            if not notifications[acc]: del notifications[acc]
+            await save_data()
+        await m.answer(f"❌ Пинг удален: <b>{acc}</b> -> <b>{tag}</b>", parse_mode="HTML")
 
 @dp.message(Command("img"))
 async def cmd_img(m: types.Message):
-    args = m.text.split()[1:]
-    is_online = len(args) == 0
-    target_accounts = list(accounts.keys()) if is_online else args
-    
-    msg = await m.answer("🎨 Генерирую карточку, скачиваю аватарки...")
-    image_bytes = await generate_status_image(target_accounts, is_online_mode=is_online)
-    photo = BufferedInputFile(image_bytes, filename="status.png")
-    await bot.send_photo(m.chat.id, photo)
-    await msg.delete()
+    try:
+        args = m.text.split()[1:]
+        is_online = len(args) == 0
+        target_accounts = list(accounts.keys()) if is_online else args
+        
+        msg = await m.answer("🎨 Генерирую карточку, скачиваю аватарки... Это займет пару секунд.")
+        image_bytes = await generate_status_image(target_accounts, is_online_mode=is_online)
+        photo = BufferedInputFile(image_bytes, filename="status.png")
+        await bot.send_photo(m.chat.id, photo)
+        await msg.delete()
+    except Exception as e:
+        logger.error(f"Критическая ошибка команды /img: {e}", exc_info=True)
+        await m.answer("❌ Произошла ошибка при создании картинки. Разработчик, смотри логи!")
+
+# --- Логика Мониторинга Вылетов ---
+async def check_timeouts():
+    now = time.time()
+    for u in list(accounts.keys()):
+        if now - accounts[u] > 120:
+            logger.info(f"Обнаружен вылет аккаунта: {u}")
+            tags = " ".join(notifications.get(u, ["<i>(без пинга)</i>"]))
+            
+            if not status_messages:
+                logger.warning("Нет активных панелей (status_messages пуст), сообщение о вылете отправлять некуда!")
+            
+            for cid in status_messages:
+                try: 
+                    await bot.send_message(cid, f"🚨 <b>{u}</b> ВЫЛЕТЕЛ!\n{tags}", parse_mode="HTML")
+                    logger.info(f"Уведомление о вылете {u} отправлено в чат {cid}")
+                except Exception as e: logger.error(f"Не удалось отправить уведомление: {e}")
+            
+            accounts.pop(u, None); start_times.pop(u, None)
+    await refresh_panels(); await save_data()
 
 @dp.message(Command("testdisconect"))
 async def cmd_test(m: types.Message):
@@ -262,13 +301,14 @@ async def cmd_test(m: types.Message):
     if len(args) > 1:
         target = args[1]
         if target in accounts:
-            accounts[target] = time.time() - 300 # Сдвигаем время на "5 минут назад"
-            if target not in notifications:
-                await m.answer(f"⚠️ У <code>{target}</code> нет пингов, но тестовое уведомление все равно придет.", parse_mode="HTML")
-            await m.answer(f"🧪 Имитация вылета <code>{target}</code> начата. Жди до 30 сек.", parse_mode="HTML")
+            accounts[target] = time.time() - 300 # Искусственно "старим" время
+            logger.info(f"Запущен тест вылета для {target}")
+            await m.answer(f"🧪 Имитация вылета <code>{target}</code> начата. Проверяю систему...", parse_mode="HTML")
+            # ИСПРАВЛЕНИЕ: Вызываем принудительную проверку мгновенно, чтобы не ждать 30с
+            await check_timeouts()
         else: await m.answer(f"Аккаунт <code>{target}</code> не в сети.", parse_mode="HTML")
 
-# --- Рассылка (Упрощенный код для экономии места) ---
+# --- Рассылка /Update ---
 @dp.message(Command("Update"))
 async def cmd_update(m: types.Message, state: FSMContext):
     if m.from_user.username != ALLOWED_ADMIN: return
@@ -276,8 +316,7 @@ async def cmd_update(m: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("u_"))
 async def u_choice(cb: types.CallbackQuery, state: FSMContext):
-    await state.set_state(PostCreation.waiting_for_title if cb.data == "u_t" else PostCreation.waiting_for_content)
-    await cb.message.answer("Жду текст:"); await cb.answer()
+    await state.set_state(PostCreation.waiting_for_title if cb.data == "u_t" else PostCreation.waiting_for_content); await cb.message.answer("Жду текст:"); await cb.answer()
 
 @dp.message(PostCreation.waiting_for_title, F.text | F.photo)
 @dp.message(PostCreation.waiting_for_content, F.text | F.photo)
@@ -325,18 +364,8 @@ async def handle_signal(request):
 
 async def monitor():
     while True:
-        try:
-            now = time.time()
-            for u in list(accounts.keys()):
-                if now - accounts[u] > 120:
-                    # ИСПРАВЛЕНИЕ: Гарантированная отправка сообщения
-                    tags = " ".join(notifications.get(u, ["<i>(без пинга)</i>"]))
-                    for cid in status_messages:
-                        try: await bot.send_message(cid, f"🚨 <b>{u}</b> ВЫЛЕТЕЛ!\n{tags}", parse_mode="HTML")
-                        except: pass
-                    accounts.pop(u, None); start_times.pop(u, None)
-            await refresh_panels(); await save_data()
-        except Exception as e: logger.error(f"Ошибка монитора: {e}")
+        try: await check_timeouts()
+        except Exception as e: logger.error(f"Ошибка в цикле монитора: {e}")
         await asyncio.sleep(30)
 
 async def main():
