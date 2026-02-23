@@ -23,6 +23,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("BSS_PRO")
 
 # --- Конфигурация ---
+VERSION = "V3.1" # Патч-версия
 TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 PORT = int(os.getenv("PORT", 8080))
@@ -154,7 +155,7 @@ def get_status_text():
 # --- ОБРАБОТЧИКИ КОМАНД ---
 @dp.message(Command("start"))
 async def cmd_start(m: types.Message):
-    await m.answer(f"<b>🐝 Улей BSS v59</b>\n\n<b>Команды:</b>\n/information — Панель\n/list — Пинги\n/add [Ник] [Тег] — Добавить\n/remove [Ник] [Тег] — Удалить", parse_mode="HTML")
+    await m.answer(f"<b>🐝 Улей BSS {VERSION}</b>\n\n<b>Команды:</b>\n/information — Панель\n/list — Пинги\n/add [Ник] [Тег] — Добавить\n/remove [Ник] [Тег] — Удалить", parse_mode="HTML")
 
 @dp.message(Command("list"))
 async def cmd_list(m: types.Message):
@@ -168,31 +169,35 @@ async def cmd_list(m: types.Message):
 async def cmd_add(m: types.Message):
     args = m.text.split()
     if len(args) < 2: return await m.answer("Использование: <code>/add Ник @тег</code>", parse_mode="HTML")
-    acc = args[1]
-    tag = args[2] if len(args) > 2 else (f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}")
+    acc, tag = args[1], args[2] if len(args) > 2 else (f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}")
     if acc not in notifications: notifications[acc] = []
     if tag not in notifications[acc]: 
         notifications[acc].append(tag)
-        await save_data()
-        await m.answer(f"✅ Пинг для <b>{acc}</b> добавлен: {tag}", parse_mode="HTML")
-    else:
-        await m.answer(f"ℹ️ Этот тег уже есть для {acc}")
+        await save_data(); await m.answer(f"✅ Пинг добавлен для <b>{acc}</b>", parse_mode="HTML")
+    else: await m.answer(f"ℹ️ Тег уже существует.")
 
 @dp.message(Command("remove"))
 async def cmd_remove(m: types.Message):
     args = m.text.split()
-    if len(args) < 2: return await m.answer("Использование: <code>/remove Ник @тег</code>", parse_mode="HTML")
+    if len(args) < 2: return await m.answer("Использование: <code>/remove Ник</code>", parse_mode="HTML")
     acc, tag = args[1], args[2] if len(args) > 2 else None
     if acc in notifications:
-        if not tag: 
-            del notifications[acc]
-            await m.answer(f"❌ Все пинги для {acc} удалены.")
+        if not tag: del notifications[acc]
         elif tag in notifications[acc]:
             notifications[acc].remove(tag)
             if not notifications[acc]: del notifications[acc]
-            await m.answer(f"❌ Пинг {tag} для {acc} удален.")
-        await save_data()
+        await save_data(); await m.answer(f"❌ Пинг для {acc} удален.")
     else: await m.answer("Ник не найден.")
+
+@dp.message(Command("testdisconect"))
+async def cmd_test(m: types.Message):
+    if m.from_user.username != ALLOWED_ADMIN: return
+    args = m.text.split()
+    if len(args) > 1 and args[1] in accounts:
+        accounts[args[1]] = time.time() - 300 # Ставим время 5 минут назад
+        await m.answer(f"🧪 Тестирую вылет {args[1]}...")
+        await check_timeouts()
+    else: await m.answer("Укажите ник, который сейчас в сети.")
 
 @dp.message(Command("information"))
 async def cmd_info(m: types.Message):
@@ -226,8 +231,8 @@ async def cmd_update(m: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("u_"))
 async def u_choice(cb: types.CallbackQuery, state: FSMContext):
-    if cb.data == "u_t": await state.set_state(PostCreation.waiting_for_title); await cb.message.answer("Введите ЗАГОЛОВОК:")
-    else: await state.set_state(PostCreation.waiting_for_content); await cb.message.answer("Введите ТЕКСТ:")
+    if cb.data == "u_t": await state.set_state(PostCreation.waiting_for_title); await cb.message.answer("ЗАГОЛОВОК:")
+    else: await state.set_state(PostCreation.waiting_for_content); await cb.message.answer("ТЕКСТ:")
     await cb.answer()
 
 @dp.message(PostCreation.waiting_for_title, F.text | F.photo)
@@ -239,7 +244,7 @@ async def collect_post(m: types.Message, state: FSMContext):
     txt = m.html_text or m.caption or ""
     st = await state.get_state()
     if st == PostCreation.waiting_for_title:
-        await state.update_data(title=txt.upper()); await state.set_state(PostCreation.waiting_for_desc); await m.answer("Теперь ОПИСАНИЕ:")
+        await state.update_data(title=txt.upper()); await state.set_state(PostCreation.waiting_for_desc); await m.answer("ОПИСАНИЕ:")
     else:
         final = f"📢 <b>{d.get('title')}</b>\n\n{txt}" if d.get('title') else f"📢 {txt}"
         await state.update_data(full_text=final); await state.set_state(PostCreation.waiting_for_confirm)
@@ -255,7 +260,7 @@ async def process_send(cb: types.CallbackQuery, state: FSMContext):
             if not d.get("photos"): await bot.send_message(cid, d['full_text'], parse_mode="HTML")
             else: await bot.send_photo(cid, d["photos"][0], caption=d['full_text'], parse_mode="HTML")
         except: pass
-    await cb.message.answer("✅ Рассылка завершена!"); await state.clear(); await cb.answer()
+    await cb.message.answer("✅ Готово!"); await state.clear(); await cb.answer()
 
 @dp.callback_query(F.data == "ask_reset")
 async def ask_res(cb: types.CallbackQuery):
@@ -263,12 +268,11 @@ async def ask_res(cb: types.CallbackQuery):
     await cb.message.edit_reply_markup(reply_markup=kb)
 
 @dp.callback_query(F.data == "refresh_only")
-async def refresh_only(cb: types.CallbackQuery):
-    await refresh_panels(); await cb.answer("Обновлено")
+async def refresh_only(cb: types.CallbackQuery): await refresh_panels(); await cb.answer("Обновлено")
 
 @dp.callback_query(F.data == "conf_res")
 async def conf_res(cb: types.CallbackQuery):
-    global session_restarts; session_restarts = 0; await save_data(); await cb.answer("Сброшено!"); await refresh_panels()
+    global session_restarts; session_restarts = 0; await save_data(); await cb.answer("Сброс!"); await refresh_panels()
 
 # --- ЯДРО МОНИТОРИНГА ---
 async def check_timeouts():
