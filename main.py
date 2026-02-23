@@ -18,7 +18,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiohttp import web
 
-# --- Логирование ---
+# --- Настройка логирования ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger("BSS_PRO")
 
@@ -28,13 +28,13 @@ REDIS_URL = os.getenv("REDIS_URL")
 PORT = int(os.getenv("PORT", 8080))
 ALLOWED_ADMIN = "Gold_mod1"
 FONT_PATH = "roboto_font.ttf"
-# Обновленная прямая ссылка (CDN), чтобы избежать 404
 FONT_URL = "https://cdn.jsdelivr.net/gh/googlefonts/roboto@main/src/hinted/Roboto-Bold.ttf"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 db = None
 
+# Глобальные данные
 accounts, start_times, notifications, status_messages = {}, {}, {}, {}
 total_restarts, session_restarts = 0, 0
 
@@ -52,19 +52,14 @@ class PostCreation(StatesGroup):
 
 # --- Вспомогательные функции ---
 async def download_font():
-    """Загрузка шрифта с новой ссылкой"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(FONT_URL, timeout=20) as r:
-                if r.status == 200:
-                    content = await r.read()
-                    with open(FONT_PATH, "wb") as f:
-                        f.write(content)
-                    logger.info(f"Шрифт успешно загружен: {len(content)} байт")
-                else:
-                    logger.error(f"Шрифт всё еще выдает ошибку {r.status}. Проверьте FONT_URL.")
-    except Exception as e:
-        logger.error(f"Ошибка при загрузке шрифта: {e}")
+    if not os.path.exists(FONT_PATH):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(FONT_URL, timeout=20) as r:
+                    if r.status == 200:
+                        with open(FONT_PATH, "wb") as f: f.write(await r.read())
+                        logger.info("Шрифт Roboto успешно загружен.")
+        except Exception as e: logger.error(f"Ошибка шрифта: {e}")
 
 async def get_roblox_avatar(username, session):
     try:
@@ -80,7 +75,7 @@ async def get_roblox_avatar(username, session):
             return Image.open(io.BytesIO(await resp.read())).convert("RGBA")
     except: return None
 
-# --- База Данных ---
+# --- Работа с БД ---
 async def load_data():
     global db, notifications, status_messages, total_restarts, session_restarts, start_times, accounts
     if not REDIS_URL: return
@@ -110,12 +105,11 @@ async def save_data():
         }))
     except: pass
 
-# --- Картинка ---
+# --- Визуализация ---
 async def generate_status_image(target_accounts, is_online_mode=True):
     width, row_h, head_h, foot_h = 750, 100, 130, 80
     height = head_h + (max(1, len(target_accounts)) * row_h) + foot_h
     img = Image.new("RGBA", (width, height), (30, 30, 30, 255))
-    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(random.choice(BG_URLS)) as r:
@@ -125,18 +119,12 @@ async def generate_status_image(target_accounts, is_online_mode=True):
                 bg = bg.resize((int(bg_w*ratio), int(bg_h*ratio)), Image.LANCZOS)
                 img.paste(bg, (0, 0))
     except: pass
-
     draw = ImageDraw.Draw(img)
     try:
-        f_l = ImageFont.truetype(FONT_PATH, 42)
-        f_m = ImageFont.truetype(FONT_PATH, 28)
-        f_s = ImageFont.truetype(FONT_PATH, 20)
-    except:
-        f_l = f_m = f_s = ImageFont.load_default()
-
+        f_l, f_m, f_s = ImageFont.truetype(FONT_PATH, 42), ImageFont.truetype(FONT_PATH, 28), ImageFont.truetype(FONT_PATH, 20)
+    except: f_l = f_m = f_s = ImageFont.load_default()
     title = "ОНЛАЙН МОНИТОРИНГ" if is_online_mode else "ПЛАН МАКРОСА"
     draw.text((45, 45), title, font=f_l, fill=(255, 255, 255), stroke_width=2, stroke_fill=(0,0,0))
-
     if target_accounts:
         async with aiohttp.ClientSession() as session:
             for i, acc in enumerate(target_accounts):
@@ -148,23 +136,14 @@ async def generate_status_image(target_accounts, is_online_mode=True):
                 if is_online_mode:
                     dur = int(time.time() - start_times.get(acc, time.time()))
                     draw.text((width-200, y+22), f"{dur//3600}ч {(dur%3600)//60}м", font=f_m, fill=(100, 255, 100))
-                else:
-                    draw.text((width-210, y+22), "ОЖИДАНИЕ", font=f_m, fill=(255, 180, 50))
-    
-    quote = random.choice(QUOTES)
-    draw.text((45, height-50), quote, font=f_s, fill=(220, 220, 220), stroke_width=1, stroke_fill=(0,0,0))
+                else: draw.text((width-210, y+22), "ОЖИДАНИЕ", font=f_m, fill=(255, 180, 50))
+    draw.text((45, height-50), random.choice(QUOTES), font=f_s, fill=(220, 220, 220), stroke_width=1, stroke_fill=(0,0,0))
     buf = io.BytesIO(); img.save(buf, format='PNG'); return buf.getvalue()
 
-# --- Системное время GMT+2 ---
 def get_status_text():
-    # Настройка времени GMT+2
     tz_gmt2 = timezone(timedelta(hours=2))
     now_str = datetime.datetime.now(tz_gmt2).strftime("%H:%M:%S")
-    
-    text = f"<b>🐝 Состояние Улья BSS</b>\n"
-    text += f"🕒 Время (GMT+2): <b>{now_str}</b>\n"
-    text += f"🔄 Сессия: {session_restarts}\n\n<blockquote>"
-    
+    text = f"<b>🐝 Состояние Улья BSS</b>\n🕒 Время (GMT+2): <b>{now_str}</b>\n🔄 Сессия: {session_restarts}\n\n<blockquote>"
     if not accounts: text += "Ожидание сигналов..."
     else:
         for u in sorted(accounts.keys()):
@@ -172,10 +151,48 @@ def get_status_text():
             text += f"🟢 <code>{u}</code> | <b>{d//3600}ч {(d%3600)//60}м</b>\n"
     return text + "</blockquote>"
 
-# --- Команды ---
+# --- ОБРАБОТЧИКИ КОМАНД ---
 @dp.message(Command("start"))
 async def cmd_start(m: types.Message):
-    await m.answer(f"<b>🐝 Улей BSS v58</b>\n\n<b>Команды:</b>\n/information — Панель\n/list — Пинги\n/add [Ник] [Тег] — Добавить\n/remove [Ник] [Тег] — Удалить", parse_mode="HTML")
+    await m.answer(f"<b>🐝 Улей BSS v59</b>\n\n<b>Команды:</b>\n/information — Панель\n/list — Пинги\n/add [Ник] [Тег] — Добавить\n/remove [Ник] [Тег] — Удалить", parse_mode="HTML")
+
+@dp.message(Command("list"))
+async def cmd_list(m: types.Message):
+    if not notifications: return await m.answer("📜 Список пингов пуст.")
+    res = "<b>📜 Настройки пингов:</b>\n"
+    for acc, tags in notifications.items():
+        res += f"• <code>{acc}</code>: {', '.join(tags)}\n"
+    await m.answer(res, parse_mode="HTML")
+
+@dp.message(Command("add"))
+async def cmd_add(m: types.Message):
+    args = m.text.split()
+    if len(args) < 2: return await m.answer("Использование: <code>/add Ник @тег</code>", parse_mode="HTML")
+    acc = args[1]
+    tag = args[2] if len(args) > 2 else (f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}")
+    if acc not in notifications: notifications[acc] = []
+    if tag not in notifications[acc]: 
+        notifications[acc].append(tag)
+        await save_data()
+        await m.answer(f"✅ Пинг для <b>{acc}</b> добавлен: {tag}", parse_mode="HTML")
+    else:
+        await m.answer(f"ℹ️ Этот тег уже есть для {acc}")
+
+@dp.message(Command("remove"))
+async def cmd_remove(m: types.Message):
+    args = m.text.split()
+    if len(args) < 2: return await m.answer("Использование: <code>/remove Ник @тег</code>", parse_mode="HTML")
+    acc, tag = args[1], args[2] if len(args) > 2 else None
+    if acc in notifications:
+        if not tag: 
+            del notifications[acc]
+            await m.answer(f"❌ Все пинги для {acc} удалены.")
+        elif tag in notifications[acc]:
+            notifications[acc].remove(tag)
+            if not notifications[acc]: del notifications[acc]
+            await m.answer(f"❌ Пинг {tag} для {acc} удален.")
+        await save_data()
+    else: await m.answer("Ник не найден.")
 
 @dp.message(Command("information"))
 async def cmd_info(m: types.Message):
@@ -209,8 +226,8 @@ async def cmd_update(m: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("u_"))
 async def u_choice(cb: types.CallbackQuery, state: FSMContext):
-    if cb.data == "u_t": await state.set_state(PostCreation.waiting_for_title); await cb.message.answer("Заголовок:")
-    else: await state.set_state(PostCreation.waiting_for_content); await cb.message.answer("Текст:")
+    if cb.data == "u_t": await state.set_state(PostCreation.waiting_for_title); await cb.message.answer("Введите ЗАГОЛОВОК:")
+    else: await state.set_state(PostCreation.waiting_for_content); await cb.message.answer("Введите ТЕКСТ:")
     await cb.answer()
 
 @dp.message(PostCreation.waiting_for_title, F.text | F.photo)
@@ -222,7 +239,7 @@ async def collect_post(m: types.Message, state: FSMContext):
     txt = m.html_text or m.caption or ""
     st = await state.get_state()
     if st == PostCreation.waiting_for_title:
-        await state.update_data(title=txt.upper()); await state.set_state(PostCreation.waiting_for_desc); await m.answer("Описание:")
+        await state.update_data(title=txt.upper()); await state.set_state(PostCreation.waiting_for_desc); await m.answer("Теперь ОПИСАНИЕ:")
     else:
         final = f"📢 <b>{d.get('title')}</b>\n\n{txt}" if d.get('title') else f"📢 {txt}"
         await state.update_data(full_text=final); await state.set_state(PostCreation.waiting_for_confirm)
@@ -253,6 +270,7 @@ async def refresh_only(cb: types.CallbackQuery):
 async def conf_res(cb: types.CallbackQuery):
     global session_restarts; session_restarts = 0; await save_data(); await cb.answer("Сброшено!"); await refresh_panels()
 
+# --- ЯДРО МОНИТОРИНГА ---
 async def check_timeouts():
     now = time.time()
     for u in list(accounts.keys()):
