@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("BSS_PRO")
 
 # --- Конфигурация ---
-VERSION = "V3.1" # Патч-версия
+VERSION = "V3.2" # Новая версия патча
 TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 PORT = int(os.getenv("PORT", 8080))
@@ -95,6 +95,9 @@ async def load_data():
                 if now - float(l_ping) < 120:
                     accounts[u] = float(l_ping)
                     if u in data.get("starts", {}): start_times[u] = float(data["starts"][u])
+        else:
+            total_restarts = 1
+            session_restarts = 1
     except Exception as e: logger.error(f"Ошибка БД: {e}")
 
 async def save_data():
@@ -155,7 +158,19 @@ def get_status_text():
 # --- ОБРАБОТЧИКИ КОМАНД ---
 @dp.message(Command("start"))
 async def cmd_start(m: types.Message):
-    await m.answer(f"<b>🐝 Улей BSS {VERSION}</b>\n\n<b>Команды:</b>\n/information — Панель\n/list — Пинги\n/add [Ник] [Тег] — Добавить\n/remove [Ник] [Тег] — Удалить", parse_mode="HTML")
+    # Вернули общий счетчик рестартов
+    res_text = (
+        f"<b>🐝 Улей BSS {VERSION}</b>\n\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"├ Рестартов сессии: <code>{session_restarts}</code>\n"
+        f"└ Всего рестартов: <code>{total_restarts}</code>\n\n"
+        f"<b>Команды:</b>\n"
+        f"/information — Панель управления\n"
+        f"/list — Список пингов\n"
+        f"/add [Ник] [Тег] — Добавить\n"
+        f"/remove [Ник] [Тег] — Удалить"
+    )
+    await m.answer(res_text, parse_mode="HTML")
 
 @dp.message(Command("list"))
 async def cmd_list(m: types.Message):
@@ -194,7 +209,7 @@ async def cmd_test(m: types.Message):
     if m.from_user.username != ALLOWED_ADMIN: return
     args = m.text.split()
     if len(args) > 1 and args[1] in accounts:
-        accounts[args[1]] = time.time() - 300 # Ставим время 5 минут назад
+        accounts[args[1]] = time.time() - 300 
         await m.answer(f"🧪 Тестирую вылет {args[1]}...")
         await check_timeouts()
     else: await m.answer("Укажите ник, который сейчас в сети.")
