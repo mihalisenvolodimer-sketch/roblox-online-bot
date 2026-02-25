@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("BSS_PRO")
 
 # --- Конфигурация ---
-VERSION = "V4.2"
+VERSION = "V4.3"
 TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 PORT = int(os.getenv("PORT", 8080))
@@ -52,7 +52,9 @@ class PostCreation(StatesGroup):
     waiting_for_content, waiting_for_title, waiting_for_desc, waiting_for_confirm = State(), State(), State(), State()
 
 class TechPause(StatesGroup):
-    choosing_target, entering_time, choosing_auto_off = State(), State(), State()
+    choosing_target = State()
+    entering_time = State()
+    choosing_auto_off = State()
 
 # --- Вспомогательные функции ---
 async def download_font():
@@ -78,7 +80,7 @@ async def get_roblox_avatar(username, session):
             return Image.open(io.BytesIO(await resp.read())).convert("RGBA")
     except: return None
 
-# --- РАБОТА С БД (Стабильный ключ) ---
+# --- РАБОТА С БД ---
 async def load_data():
     global db, notifications, status_messages, total_restarts, session_restarts, start_times, accounts, pause_data
     if not REDIS_URL: return
@@ -111,24 +113,29 @@ async def save_data():
         }))
     except: pass
 
-# --- ВИЗУАЛИЗАЦИЯ (V4.2 UPGRADE) ---
+# --- ВИЗУАЛИЗАЦИЯ (/img) ---
 async def generate_status_image(target_accounts, is_online_mode=True):
     width, row_h, head_h, foot_h = 750, 100, 130, 80
     height = head_h + (max(1, len(target_accounts)) * row_h) + foot_h
     img = Image.new("RGBA", (width, height), (30, 30, 30, 255))
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(random.choice(BG_URLS)) as r:
-                bg = Image.open(io.BytesIO(await r.read())).convert("RGBA")
-                bg_w, bg_h = bg.size
-                ratio = max(width/bg_w, height/bg_h)
-                bg = bg.resize((int(bg_w*ratio), int(bg_h*ratio)), Image.LANCZOS)
-                img.paste(bg, (0, 0))
-    except: pass
+            async with session.get(random.choice(BG_URLS), timeout=5) as r:
+                if r.status == 200:
+                    bg = Image.open(io.BytesIO(await r.read())).convert("RGBA")
+                    bg_w, bg_h = bg.size
+                    ratio = max(width/bg_w, height/bg_h)
+                    bg = bg.resize((int(bg_w*ratio), int(bg_h*ratio)), Image.LANCZOS)
+                    img.paste(bg, (0, 0))
+    except Exception as e: logger.error(f"Фон не загружен: {e}")
+    
     draw = ImageDraw.Draw(img)
     try:
-        f_l, f_m, f_s = ImageFont.truetype(FONT_PATH, 42), ImageFont.truetype(FONT_PATH, 28), ImageFont.truetype(FONT_PATH, 20)
-    except: f_l = f_m = f_s = ImageFont.load_default()
+        f_l = ImageFont.truetype(FONT_PATH, 42)
+        f_m = ImageFont.truetype(FONT_PATH, 28)
+        f_s = ImageFont.truetype(FONT_PATH, 20)
+    except: 
+        f_l = f_m = f_s = ImageFont.load_default()
     
     title = "ОНЛАЙН МОНИТОРИНГ" if is_online_mode else "ПЛАН МАКРОСА"
     draw.text((45, 45), title, font=f_l, fill=(255, 255, 255), stroke_width=2, stroke_fill=(0,0,0))
@@ -143,7 +150,6 @@ async def generate_status_image(target_accounts, is_online_mode=True):
                 if av: img.paste(av.resize((70, 70)), (50, y+8), av.resize((70, 70)))
                 draw.text((140, y+22), acc, font=f_m, fill=(255, 255, 255))
                 
-                # ЛОГИКА СТАТУСА НА КАРТИНКЕ
                 if acc in pause_data and now < pause_data[acc]['until']:
                     draw.text((width-240, y+22), "ТЕХ. ПЕРЕРЫВ", font=f_m, fill=(255, 180, 50))
                 elif is_online_mode and acc in accounts:
@@ -175,20 +181,74 @@ def get_status_text():
         text += "</blockquote>"
     return text
 
-# --- КОМАНДЫ ---
+# --- БАЗОВЫЕ КОМАНДЫ ---
+@dp.message(Command("start"))
+async def cmd_start(m: types.Message):
+    res_text = (
+        f"<b>🐝 Улей BSS {VERSION}</b>\n\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"├ Рестартов сессии: <code>{session_restarts}</code>\n"
+        f"└ Всего рестартов: <code>{total_restarts}</code>\n\n"
+        f"<b>Команды:</b>\n"
+        f"/information — Панель управления\n"
+        f"/img — Картинка статуса\n"
+        f"/list — Список пингов\n"
+        f"/add [Ник] [Тег] — Добавить\n"
+        f"/remove [Ник] [Тег] — Удалить"
+    )
+    await m.answer(res_text, parse_mode="HTML")
+
 @dp.message(Command("img"))
 async def cmd_img(m: types.Message):
     args = m.text.split()[1:]
     is_on = len(args) == 0
     t_accs = list(set(list(accounts.keys()) + list(pause_data.keys()))) if is_on else args
     if not t_accs: return await m.answer("Нет активных аккаунтов для отрисовки.")
+    
     msg = await m.answer("🎨 Отрисовываю мониторинг...")
     try:
         img_bytes = await generate_status_image(t_accs, is_on)
-        await bot.send_photo(m.chat.id, BufferedInputFile(img_bytes, filename="bss.png"))
+        await m.answer_photo(photo=BufferedInputFile(file=img_bytes, filename="bss.png"))
         await msg.delete()
-    except Exception as e: await msg.edit_text(f"Ошибка отрисовки: {e}")
+    except Exception as e: 
+        logger.error(f"Ошибка img: {e}")
+        await msg.edit_text(f"Ошибка отрисовки: {e}")
 
+# --- ОСТАЛЬНЫЕ КОМАНДЫ ---
+@dp.message(Command("list"))
+async def cmd_list(m: types.Message):
+    if not notifications: return await m.answer("Список пуст.")
+    res = "<b>📜 Настройки пингов:</b>\n"
+    for acc, tags in notifications.items():
+        status = " (🛠 ПАУЗА)" if acc in pause_data and time.time() < pause_data[acc]['until'] else ""
+        res += f"• <code>{acc}</code>: {', '.join(tags)}{status}\n"
+    await m.answer(res, parse_mode="HTML")
+
+@dp.message(Command("add"))
+async def cmd_add(m: types.Message):
+    args = m.text.split()
+    if len(args) < 2: return await m.answer("Использование: <code>/add Ник @тег</code>", parse_mode="HTML")
+    acc, tag = args[1], args[2] if len(args) > 2 else (f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}")
+    if acc not in notifications: notifications[acc] = []
+    if tag not in notifications[acc]: 
+        notifications[acc].append(tag)
+        await save_data(); await m.answer(f"✅ Пинг добавлен для <b>{acc}</b>", parse_mode="HTML")
+    else: await m.answer(f"ℹ️ Тег уже существует.")
+
+@dp.message(Command("remove"))
+async def cmd_remove(m: types.Message):
+    args = m.text.split()
+    if len(args) < 2: return await m.answer("Использование: <code>/remove Ник</code>", parse_mode="HTML")
+    acc, tag = args[1], args[2] if len(args) > 2 else None
+    if acc in notifications:
+        if not tag: del notifications[acc]
+        elif tag in notifications[acc]:
+            notifications[acc].remove(tag)
+            if not notifications[acc]: del notifications[acc]
+        await save_data(); await m.answer(f"❌ Пинг для {acc} удален.")
+    else: await m.answer("Ник не найден.")
+
+# --- АДМИН ПАНЕЛЬ ---
 @dp.message(Command("adm"))
 async def cmd_adm(m: types.Message):
     if m.from_user.username != ALLOWED_ADMIN: return
@@ -220,7 +280,7 @@ async def do_test(cb: types.CallbackQuery):
 async def back_to_adm(cb: types.CallbackQuery):
     await cmd_adm(cb.message); await cb.message.delete(); await cb.answer()
 
-# --- ТЕХПЕРЕРЫВ (ИНТЕГРАЦИЯ) ---
+# --- ТЕХПЕРЕРЫВ (ИСПРАВЛЕНЫ КНОПКИ) ---
 @dp.callback_query(F.data == "ask_reset")
 async def tech_main(cb: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -241,22 +301,31 @@ async def tp_menu(cb: types.CallbackQuery):
 @dp.callback_query(F.data == "tp_create")
 async def tp_target(cb: types.CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 ВСЕ", callback_data="target_all")], [InlineKeyboardButton(text="🐝 НИК", callback_data="target_one")]])
-    await cb.message.edit_text("Для кого создать техперерыв?", reply_markup=kb); await state.set_state(TechPause.choosing_target); await cb.answer()
+    await cb.message.edit_text("Для кого создать техперерыв?", reply_markup=kb)
+    await state.set_state(TechPause.choosing_target)
+    await cb.answer()
 
-@dp.callback_query(TechPause.choosing_target)
+# Фильтр только на target_all и target_one
+@dp.callback_query(TechPause.choosing_target, F.data.in_(["target_all", "target_one"]))
 async def tp_target_choice(cb: types.CallbackQuery, state: FSMContext):
     if cb.data == "target_all":
         await state.update_data(target="ALL")
-        await cb.message.edit_text("Введите время (мин):"); await state.set_state(TechPause.entering_time)
+        await cb.message.edit_text("Введите время (мин):")
+        await state.set_state(TechPause.entering_time)
     else:
         btns = [[InlineKeyboardButton(text=u, callback_data=f"sel_{u}")] for u in notifications]
+        btns.append([InlineKeyboardButton(text="🔙 Назад", callback_data="tp_menu")])
         await cb.message.edit_text("Выберите ник:", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
     await cb.answer()
 
-@dp.callback_query(F.data.startswith("sel_"))
+# Фильтр на нажатие конкретного ника (начинается с sel_)
+@dp.callback_query(TechPause.choosing_target, F.data.startswith("sel_"))
 async def tp_sel_one(cb: types.CallbackQuery, state: FSMContext):
-    nick = cb.data.replace("sel_", ""); await state.update_data(target=nick)
-    await cb.message.edit_text(f"Время для {nick} (мин):"); await state.set_state(TechPause.entering_time); await cb.answer()
+    nick = cb.data.replace("sel_", "")
+    await state.update_data(target=nick)
+    await cb.message.edit_text(f"Время для {nick} (мин):")
+    await state.set_state(TechPause.entering_time)
+    await cb.answer()
 
 @dp.message(TechPause.entering_time)
 async def tp_time(m: types.Message, state: FSMContext):
@@ -278,7 +347,8 @@ async def tp_final(cb: types.CallbackQuery, state: FSMContext):
     await save_data(); await refresh_panels()
     msg = await cb.message.edit_text(f"🛠 <b>Техперерыв: {target_name}</b> (+{data['mins']}м)", parse_mode="HTML")
     await state.clear(); await cb.answer()
-    await asyncio.sleep(10); await msg.delete()
+    await asyncio.sleep(15); try: await msg.delete() 
+    except: pass
 
 @dp.callback_query(F.data == "tp_delete")
 async def tp_del_menu(cb: types.CallbackQuery):
