@@ -40,7 +40,7 @@ accounts, start_times, notifications, status_messages = {}, {}, {}, {}
 pause_data = {} # {username: {"until": timestamp, "auto_off": bool}}
 total_restarts, session_restarts = 0, 0
 
-QUOTES = ["Пчёлы не спят, они фармят!", "Мёд сам себя не соберёт.", "Удачного фарма, легенда!", "Мониторинг на страже."," 330 строчек кода - Мелочь!"]
+QUOTES = ["Пчёлы не спят, они фармят!", "Мёд сам себя не соберёт.", "Удачного фарма, легенда!", "Мониторинг на страже."]
 BG_URLS = ["https://wallpaperaccess.com/full/7500647.png", "https://wallpaperaccess.com/full/14038149.jpg"]
 
 class PostCreation(StatesGroup):
@@ -71,19 +71,21 @@ async def get_roblox_avatar(username, session):
             return Image.open(io.BytesIO(await resp.read())).convert("RGBA")
     except: return None
 
-# --- Работа с БД ---
+# --- Работа с БД (Вернули старый ключ) ---
 async def load_data():
     global db, notifications, status_messages, total_restarts, session_restarts, start_times, accounts, pause_data
     if not REDIS_URL: return
     try:
         db = redis.from_url(REDIS_URL, decode_responses=True)
-        raw = await db.get("BSS_V4_DATA")
+        # ИСПОЛЬЗУЕМ СТАРЫЙ КЛЮЧ, ЧТОБЫ НЕ СЛЕТЕЛИ ДАННЫЕ
+        raw = await db.get("BSS_V37_STABLE_FINAL")
         if raw:
             data = json.loads(raw)
             notifications.update(data.get("notifs", {}))
             status_messages.update(data.get("msgs", {}))
             total_restarts = data.get("total_restarts", 0) + 1
             session_restarts = data.get("session_restarts", 0) + 1
+            # Аккуратно подтягиваем паузы, если их не было - будет пусто
             pause_data = data.get("pause_data", {})
             saved_accs = data.get("accounts", {})
             now = time.time()
@@ -97,7 +99,8 @@ async def load_data():
 async def save_data():
     if not db: return
     try:
-        await db.set("BSS_V4_DATA", json.dumps({
+        # СОХРАНЯЕМ В СТАРЫЙ КЛЮЧ + НОВЫЙ ПАРАМЕТР pause_data
+        await db.set("BSS_V37_STABLE_FINAL", json.dumps({
             "notifs": notifications, "msgs": status_messages, "total_restarts": total_restarts,
             "session_restarts": session_restarts, "starts": start_times, "accounts": accounts,
             "pause_data": pause_data
@@ -158,6 +161,24 @@ async def do_test(cb: types.CallbackQuery):
         await check_timeouts()
     await adm_test_list(cb)
 
+@dp.callback_query(F.data == "adm_list")
+async def adm_list(cb: types.CallbackQuery):
+    if not notifications: return await cb.answer("Список пуст.", show_alert=True)
+    res = "<b>📜 Настройки пингов:</b>\n"
+    for acc, tags in notifications.items():
+        status = " (🛠 ПАУЗА)" if acc in pause_data and time.time() < pause_data[acc]['until'] else ""
+        res += f"• <code>{acc}</code>: {', '.join(tags)}{status}\n"
+    await cb.message.edit_text(res, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_adm")]]), parse_mode="HTML")
+
+@dp.callback_query(F.data == "back_to_adm")
+async def back_to_adm(cb: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Рассылка Новостей", callback_data="adm_upd")],
+        [InlineKeyboardButton(text="🧪 Тест Вылета", callback_data="adm_test")],
+        [InlineKeyboardButton(text="📋 Список Пингов", callback_data="adm_list")]
+    ])
+    await cb.message.edit_text("🕹 <b>Панель администратора:</b>", reply_markup=kb, parse_mode="HTML")
+
 @dp.message(Command("list"))
 async def cmd_list(m: types.Message):
     if not notifications: return await m.answer("Список пуст.")
@@ -167,16 +188,47 @@ async def cmd_list(m: types.Message):
         res += f"• <code>{acc}</code>: {', '.join(tags)}{status}\n"
     await m.answer(res, parse_mode="HTML")
 
+@dp.message(Command("add"))
+async def cmd_add(m: types.Message):
+    args = m.text.split()
+    if len(args) < 2: return await m.answer("Использование: <code>/add Ник @тег</code>", parse_mode="HTML")
+    acc, tag = args[1], args[2] if len(args) > 2 else (f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}")
+    if acc not in notifications: notifications[acc] = []
+    if tag not in notifications[acc]: 
+        notifications[acc].append(tag)
+        await save_data(); await m.answer(f"✅ Пинг добавлен для <b>{acc}</b>", parse_mode="HTML")
+    else: await m.answer(f"ℹ️ Тег уже существует.")
+
+@dp.message(Command("remove"))
+async def cmd_remove(m: types.Message):
+    args = m.text.split()
+    if len(args) < 2: return await m.answer("Использование: <code>/remove Ник</code>", parse_mode="HTML")
+    acc, tag = args[1], args[2] if len(args) > 2 else None
+    if acc in notifications:
+        if not tag: del notifications[acc]
+        elif tag in notifications[acc]:
+            notifications[acc].remove(tag)
+            if not notifications[acc]: del notifications[acc]
+        await save_data(); await m.answer(f"❌ Пинг для {acc} удален.")
+    else: await m.answer("Ник не найден.")
+
 # --- ЛОГИКА ТЕХПЕРЕРЫВА ---
 @dp.callback_query(F.data == "ask_reset")
 async def tech_main(cb: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Создать перерыв", callback_data="tp_create")],
-        [InlineKeyboardButton(text="🗑 Удалить перерыв", callback_data="tp_delete")],
+        [InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="tp_menu")],
         [InlineKeyboardButton(text="⚠️ Сброс Сессии", callback_data="conf_res")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="tp_back")]
+        [InlineKeyboardButton(text="🔄 Обновить время", callback_data="refresh_only")]
     ])
     await cb.message.edit_reply_markup(reply_markup=kb)
+
+@dp.callback_query(F.data == "tp_menu")
+async def tp_menu(cb: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать", callback_data="tp_create"), InlineKeyboardButton(text="🗑 Удалить", callback_data="tp_delete")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="tp_back")]
+    ])
+    await cb.message.edit_text("🛠 <b>Меню Техперерывов:</b>", reply_markup=kb, parse_mode="HTML")
 
 @dp.callback_query(F.data == "tp_create")
 async def tp_target(cb: types.CallbackQuery, state: FSMContext):
@@ -227,7 +279,7 @@ async def tp_final(cb: types.CallbackQuery, state: FSMContext):
         current_until = pause_data.get(t, {}).get("until", now)
         base = max(now, current_until)
         pause_data[t] = {"until": base + dur, "auto_off": auto}
-        accounts.pop(t, None) # Убираем из активных, чтобы не было алертов
+        accounts.pop(t, None) # Убираем из активных
     
     await save_data(); await refresh_panels()
     
@@ -302,11 +354,50 @@ async def handle_signal(request):
     except: pass
     return web.Response(status=400)
 
-# --- Стандартные обработчики (Update и прочее) ---
+# --- Стандартные обработчики ---
 @dp.callback_query(F.data == "adm_upd")
 async def adm_upd_start(cb: types.CallbackQuery, state: FSMContext):
     await state.set_data({"photos": []})
     await cb.message.answer("Тип новости:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="С заголовком", callback_data="u_t"), InlineKeyboardButton(text="Без", callback_data="u_s")]]))
+
+@dp.message(Command("Update"))
+async def cmd_update(m: types.Message, state: FSMContext):
+    if m.from_user.username != ALLOWED_ADMIN: return
+    await state.set_data({"photos": []})
+    await m.answer("Тип новости:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="С заголовком", callback_data="u_t"), InlineKeyboardButton(text="Без заголовка", callback_data="u_s")]]))
+
+@dp.callback_query(F.data.startswith("u_"))
+async def u_choice(cb: types.CallbackQuery, state: FSMContext):
+    if cb.data == "u_t": await state.set_state(PostCreation.waiting_for_title); await cb.message.answer("ЗАГОЛОВОК:")
+    else: await state.set_state(PostCreation.waiting_for_content); await cb.message.answer("ТЕКСТ:")
+    await cb.answer()
+
+@dp.message(PostCreation.waiting_for_title, F.text | F.photo)
+@dp.message(PostCreation.waiting_for_content, F.text | F.photo)
+@dp.message(PostCreation.waiting_for_desc, F.text | F.photo)
+async def collect_post(m: types.Message, state: FSMContext):
+    d = await state.get_data(); photos = d.get("photos", [])
+    if m.photo: photos.append(m.photo[-1].file_id); await state.update_data(photos=photos)
+    txt = m.html_text or m.caption or ""
+    st = await state.get_state()
+    if st == PostCreation.waiting_for_title:
+        await state.update_data(title=txt.upper()); await state.set_state(PostCreation.waiting_for_desc); await m.answer("ОПИСАНИЕ:")
+    else:
+        final = f"📢 <b>{d.get('title')}</b>\n\n{txt}" if d.get('title') else f"📢 {txt}"
+        await state.update_data(full_text=final); await state.set_state(PostCreation.waiting_for_confirm)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="ОТПРАВИТЬ ✅", callback_data="send_all")]])
+        if photos: await m.answer_photo(photos[0], caption=final, parse_mode="HTML", reply_markup=kb)
+        else: await m.answer(final, parse_mode="HTML", reply_markup=kb)
+
+@dp.callback_query(F.data == "send_all")
+async def process_send(cb: types.CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    for cid in status_messages:
+        try:
+            if not d.get("photos"): await bot.send_message(cid, d['full_text'], parse_mode="HTML")
+            else: await bot.send_photo(cid, d["photos"][0], caption=d['full_text'], parse_mode="HTML")
+        except: pass
+    await cb.message.answer("✅ Готово!"); await state.clear(); await cb.answer()
 
 @dp.message(Command("information"))
 async def cmd_info(m: types.Message):
@@ -324,6 +415,9 @@ async def cmd_info(m: types.Message):
 @dp.callback_query(F.data == "tp_back")
 async def tp_back(cb: types.CallbackQuery):
     await cb.message.edit_text(get_status_text(), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Настройки / Рестарт", callback_data="ask_reset")]]), parse_mode="HTML")
+
+@dp.callback_query(F.data == "refresh_only")
+async def refresh_only(cb: types.CallbackQuery): await refresh_panels(); await cb.answer("Обновлено")
 
 @dp.callback_query(F.data == "conf_res")
 async def conf_res_v4(cb: types.CallbackQuery):
