@@ -10,11 +10,11 @@ from aiogram.fsm.context import FSMContext
 from aiohttp import web
 
 # --- Конфигурация ---
-VERSION = "V4.9.7-FULL"
+VERSION = "V5.0 RELEASE"
 TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 PORT = int(os.getenv("PORT", 8080))
-ALLOWED_ADMIN = "Gold_mod1" # Твой ник
+ALLOWED_ADMIN = "Gold_mod1" 
 FONT_PATH = "roboto_font.ttf"
 FONT_URL = "https://cdn.jsdelivr.net/gh/googlefonts/roboto@main/src/hinted/Roboto-Bold.ttf"
 
@@ -28,7 +28,7 @@ db = None
 # Глобальные данные
 accounts, start_times, notifications, status_messages = {}, {}, {}, {}
 pause_data = {} 
-raw_data_storage = {} # Сюда падают мёд/рюкзак для теста
+acc_stats = {} # Хранение мёда и рюкзака
 total_restarts, session_restarts = 0, 0
 
 BG_URLS = ["https://wallpaperaccess.com/full/7500647.png", "https://wallpaperaccess.com/full/14038208.jpg"]
@@ -70,13 +70,13 @@ async def get_roblox_avatar(username, session):
             return Image.open(io.BytesIO(await resp.read())).convert("RGBA")
     except: return None
 
-# --- База Данных ---
+# --- База Данных (Старый Ключ Возвращен) ---
 async def load_data():
     global db, notifications, status_messages, total_restarts, session_restarts, start_times, accounts, pause_data
     if not REDIS_URL: return
     try:
         db = redis.from_url(REDIS_URL, decode_responses=True)
-        raw = await db.get("BSS_V49_STABLE")
+        raw = await db.get("BSS_V4_STABLE") # Твой старый ключ базы
         if raw:
             data = json.loads(raw)
             notifications.update(data.get("notifs", {}))
@@ -95,16 +95,16 @@ async def load_data():
 async def save_data():
     if not db: return
     try:
-        await db.set("BSS_V49_STABLE", json.dumps({
+        await db.set("BSS_V4_STABLE", json.dumps({
             "notifs": notifications, "msgs": status_messages, "total_restarts": total_restarts,
             "session_restarts": session_restarts, "starts": start_times, "accounts": accounts,
             "pause_data": pause_data
         }))
     except: pass
 
-# --- Визуализация (Status Image) ---
+# --- Визуализация ---
 async def generate_status_image(target_accounts, is_online_mode=True):
-    width, row_h, head_h, foot_h = 750, 110, 130, 80
+    width, row_h, head_h, foot_h = 750, 115, 130, 80
     height = head_h + (max(1, len(target_accounts)) * row_h) + foot_h
     img = Image.new("RGBA", (width, height), (40, 40, 40, 255))
     
@@ -117,10 +117,10 @@ async def generate_status_image(target_accounts, is_online_mode=True):
     except: pass
     
     draw = ImageDraw.Draw(img)
-    try: f_l = ImageFont.truetype(FONT_PATH, 42); f_m = ImageFont.truetype(FONT_PATH, 28); f_s = ImageFont.truetype(FONT_PATH, 18)
+    try: f_l, f_m, f_s = ImageFont.truetype(FONT_PATH, 42), ImageFont.truetype(FONT_PATH, 28), ImageFont.truetype(FONT_PATH, 18)
     except: f_l = f_m = f_s = ImageFont.load_default()
     
-    draw.text((45, 40), "ОНЛАЙН СТАТУС" if is_online_mode else "ПЛАН МАКРОСА", font=f_l, fill=(255, 255, 255), stroke_width=2, stroke_fill=(0,0,0))
+    draw.text((45, 40), "ОНЛАЙН МОНИТОРИНГ", font=f_l, fill=(255, 255, 255), stroke_width=2, stroke_fill=(0,0,0))
     
     now = time.time()
     async with aiohttp.ClientSession() as session:
@@ -128,9 +128,13 @@ async def generate_status_image(target_accounts, is_online_mode=True):
             y = head_h + (i * row_h)
             draw.rounded_rectangle([30, y, width-30, y+row_h-10], fill=(0, 0, 0, 180), radius=15)
             av = await get_roblox_avatar(acc, session)
-            if av: img.paste(av.resize((80, 80)), (45, y+10), av.resize((80, 80)))
+            if av: img.paste(av.resize((85, 85)), (45, y+10), av.resize((85, 85)))
             
-            draw.text((140, y+20), acc, font=f_m, fill=(255, 255, 255))
+            draw.text((145, y+15), acc, font=f_m, fill=(255, 255, 255))
+            
+            # Статистика под ником на картинке
+            st = acc_stats.get(acc, {"h": "0", "b": "0%"})
+            draw.text((145, y+55), f"🍯 {st['h']} | 🎒 {st['b']}", font=f_s, fill=(200, 200, 200))
             
             if acc in pause_data and now < pause_data[acc]['until']:
                 draw.text((width-220, y+35), "ПАУЗА", font=f_m, fill=(255, 165, 0))
@@ -145,33 +149,27 @@ async def generate_status_image(target_accounts, is_online_mode=True):
 def get_status_text():
     now_str = datetime.datetime.now(timezone(timedelta(hours=2))).strftime("%H:%M:%S")
     now = time.time()
-    text = f"<b>🐝 Улей BSS {VERSION}</b>\n🕒 Время: <b>{now_str}</b>\n\n"
-    acc_list = sorted(list(set(list(accounts.keys()) + list(pause_data.keys()))))
+    text = f"<b>🐝 Улей BSS {VERSION}</b>\n🕒 Время: <b>{now_str}</b>\n"
+    text += f"🔄 Рестартов: <b>{session_restarts}</b> (Всего: {total_restarts})\n\n"
     
+    acc_list = sorted(list(set(list(accounts.keys()) + list(pause_data.keys()))))
     if not acc_list: text += "<blockquote>Сигналов нет...</blockquote>"
     else:
         for u in acc_list:
             if u in pause_data and now < pause_data[u]['until']:
                 rem = int(pause_data[u]['until'] - now)
-                text += f"🛠 <code>{u}</code> | <b>ТЕХПЕРЕРЫВ ({rem//60}м)</b>\n"
+                text += f"🛠 <code>{u}</code> | <b>ПАУЗА ({rem//60}м)</b>\n"
             elif u in accounts:
                 d = int(now - start_times.get(u, now))
-                text += f"🟢 <code>{u}</code> | 🕒 <b>{d//3600}ч {(d%3600)//60}м</b>\n"
+                st = acc_stats.get(u, {"h": "0", "b": "0%"})
+                text += f"🟢 <code>{u}</code> | 🍯 <b>{st['h']}</b> | 🎒 <b>{st['b']}</b>\n"
+                text += f"└ 🕒 <b>{d//3600}ч {(d%3600)//60}м в сети</b>\n\n"
     return text
 
-# --- ХЕНДЛЕРЫ КОМАНД ---
+# --- ХЕНДЛЕРЫ ---
 @dp.message(Command("start"))
 async def cmd_start(m: types.Message):
-    await m.answer(f"<b>🐝 BSS {VERSION}</b>\n\n/information — Статус\n/img — Картинка\n/list — Пинги\n/add [Ник] [Тег]\n/honeyupdtest — Тест статы", parse_mode="HTML")
-
-@dp.message(Command("honeyupdtest"))
-async def cmd_honey_test(m: types.Message):
-    if not raw_data_storage: return await m.answer("❌ Данных нет. Запусти скрипт!")
-    res = "🧪 <b>РЕАЛЬНЫЕ ДАННЫЕ (ТЕСТ):</b>\n\n"
-    for user, data in raw_data_storage.items():
-        h, p, c = data.get("honey", 0), data.get("pollen", 0), data.get("capacity", 1)
-        res += f"👤 <code>{user}</code>\n🍯 Мёд: {format_honey(h)}\n🎒 Рюкзак: {int((p/c)*100)}% ({p}/{c})\n\n"
-    await m.answer(res, parse_mode="HTML")
+    await m.answer(f"<b>🐝 BSS {VERSION}</b>\n\n/information — Статус\n/img — Картинка\n/list — Пинги\n/add [Ник] [Тег]\n/test_dc — Тест вылета", parse_mode="HTML")
 
 @dp.message(Command("information"))
 async def cmd_info(m: types.Message):
@@ -181,7 +179,17 @@ async def cmd_info(m: types.Message):
         except: pass
     msg = await m.answer(get_status_text(), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚙️ Настройки", callback_data="ask_reset")]]))
     status_messages[cid] = msg.message_id
+    # Авто-закреп
+    try: await bot.pin_chat_message(chat_id=m.chat.id, message_id=msg.message_id, disable_notification=True)
+    except: pass
     await save_data()
+
+@dp.message(Command("test_dc"))
+async def cmd_test_dc(m: types.Message):
+    if not accounts: return await m.answer("Нет аккаунтов в сети.")
+    acc = list(accounts.keys())[0]
+    accounts.pop(acc, None)
+    await m.answer(f"🧪 Тест вылета запущен для {acc}. Жди 30 сек.")
 
 @dp.message(Command("img"))
 async def cmd_img(m: types.Message):
@@ -189,75 +197,72 @@ async def cmd_img(m: types.Message):
     is_on = len(args) == 0
     t_accs = list(set(list(accounts.keys()) + list(pause_data.keys()))) if is_on else args
     if not t_accs: return await m.answer("Список пуст.")
-    
     msg = await m.answer("🎨 Рисую...")
     try:
         img_bytes = await generate_status_image(t_accs, is_online_mode=is_on)
-        await m.answer_photo(photo=BufferedInputFile(file=img_bytes, filename="status.png"))
+        await m.answer_photo(photo=BufferedInputFile(file=img_bytes, filename="bss.png"))
         await msg.delete()
     except Exception as e: await msg.edit_text(f"Ошибка: {e}")
 
 @dp.message(Command("list"))
 async def cmd_list(m: types.Message):
-    if not notifications: return await m.answer("Список пуст.")
-    res = "<b>📜 Настройка уведомлений:</b>\n"
+    if not notifications: return await m.answer("Список пингов пуст.")
+    res = "<b>📜 Список уведомлений:</b>\n"
     for acc, tags in notifications.items(): res += f"• <code>{acc}</code>: {', '.join(tags)}\n"
     await m.answer(res, parse_mode="HTML")
 
 @dp.message(Command("add"))
 async def cmd_add(m: types.Message):
     args = m.text.split()
-    if len(args) < 2: return await m.answer("Формат: /add Ник @тег")
+    if len(args) < 2: return await m.answer("Напиши: /add Ник @тег")
     acc, tag = args[1], args[2] if len(args) > 2 else f"ID:{m.from_user.id}"
     if acc not in notifications: notifications[acc] = []
     notifications[acc].append(tag); await save_data()
-    await m.answer(f"✅ Аккаунт {acc} добавлен для уведомлений.")
+    await m.answer(f"✅ {acc} добавлен.")
 
 @dp.message(Command("remove"))
 async def cmd_remove(m: types.Message):
     args = m.text.split()
-    if len(args) < 2: return await m.answer("Укажи ник.")
+    if len(args) < 2: return await m.answer("Кого удалить?")
     if args[1] in notifications:
         del notifications[args[1]]; await save_data()
-        await m.answer(f"❌ Аккаунт {args[1]} удален.")
+        await m.answer(f"❌ {args[1]} удален.")
 
-# --- АДМИНКА И РАССЫЛКА ---
+# --- АДМИНКА И РАССЫЛКА (ФИКСЫ) ---
 @dp.message(Command("adm"))
 async def cmd_adm(m: types.Message):
     if m.from_user.username != ALLOWED_ADMIN: return
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📢 Рассылка всем", callback_data="adm_broadcast")]])
-    await m.answer("🕹 <b>Админ-панель:</b>", reply_markup=kb, parse_mode="HTML")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")]])
+    await m.answer("🕹 <b>Панель администратора:</b>", reply_markup=kb, parse_mode="HTML")
 
 @dp.callback_query(F.data == "adm_broadcast")
 async def adm_bc(cb: types.CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📝 С заголовком", callback_data="bc_t_yes"), InlineKeyboardButton(text="💬 Без", callback_data="bc_t_no")]])
-    await cb.message.edit_text("Выбери формат:", reply_markup=kb)
+    await cb.message.edit_text("Выберите формат сообщения:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("bc_t_"))
 async def bc_step1(cb: types.CallbackQuery, state: FSMContext):
     use_t = cb.data == "bc_t_yes"
     await state.update_data(has_title=use_t)
-    if use_t:
-        await cb.message.edit_text("Введи заголовок:"); await state.set_state(PostCreation.waiting_for_title)
-    else:
-        await cb.message.edit_text("Введи текст сообщения:"); await state.set_state(PostCreation.waiting_for_text)
+    await cb.message.edit_text("Введите заголовок:" if use_t else "Введите текст:")
+    await state.set_state(PostCreation.waiting_for_title if use_t else PostCreation.waiting_for_text)
 
 @dp.message(PostCreation.waiting_for_title)
 async def bc_title(m: types.Message, state: FSMContext):
-    await state.update_data(title=m.text); await m.answer("Теперь введи текст сообщения:"); await state.set_state(PostCreation.waiting_for_text)
+    await state.update_data(title=m.text); await m.answer("Введите текст:"); await state.set_state(PostCreation.waiting_for_text)
 
 @dp.message(PostCreation.waiting_for_text)
 async def bc_text(m: types.Message, state: FSMContext):
-    await state.update_data(text=m.text); await m.answer("Пришли фото или нажми пропустить:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Пропустить ⏩", callback_data="bc_skip_photo")]]))
+    await state.update_data(text=m.text); await m.answer("Пришлите фото или пропустите:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Пропустить ⏩", callback_data="bc_skip_photo")]]))
     await state.set_state(PostCreation.waiting_for_photo)
-
-@dp.message(PostCreation.waiting_for_photo, F.photo)
-async def bc_photo(m: types.Message, state: FSMContext):
-    await state.update_data(photo_id=m.photo[-1].file_id); await show_bc_preview(m, state)
 
 @dp.callback_query(F.data == "bc_skip_photo")
 async def bc_skip_p(cb: types.CallbackQuery, state: FSMContext):
     await state.update_data(photo_id=None); await show_bc_preview(cb.message, state)
+
+@dp.message(PostCreation.waiting_for_photo, F.photo)
+async def bc_photo(m: types.Message, state: FSMContext):
+    await state.update_data(photo_id=m.photo[-1].file_id); await show_bc_preview(m, state)
 
 async def show_bc_preview(m, state):
     d = await state.get_data(); text = f"<blockquote>{d['text']}</blockquote>"
@@ -271,25 +276,39 @@ async def show_bc_preview(m, state):
 async def bc_send(cb: types.CallbackQuery, state: FSMContext):
     d = await state.get_data(); text = f"<blockquote>{d['text']}</blockquote>"
     if d.get("has_title"): text = f"📢 <b>{d['title']}</b>\n\n{text}"
-    count = 0
     for cid in status_messages:
         try:
             if d.get("photo_id"): await bot.send_photo(cid, d["photo_id"], caption=text, parse_mode="HTML")
             else: await bot.send_message(cid, text, parse_mode="HTML")
-            count += 1
         except: pass
-    await cb.message.answer(f"✅ Рассылка завершена! Отправлено в {count} чатов."); await state.clear()
+    await cb.message.answer("✅ Рассылка завершена."); await state.clear()
 
-# --- ТЕХНИЧЕСКИЕ ПАУЗЫ ---
+@dp.callback_query(F.data == "bc_cancel")
+async def bc_cancel(cb: types.CallbackQuery, state: FSMContext):
+    await state.clear(); await cb.message.delete(); await cb.answer("Отменено")
+
+# --- НАСТРОЙКИ И ТЕХПЕРЕРЫВ ---
 @dp.callback_query(F.data == "ask_reset")
 async def tech_root(cb: types.CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="tp_menu")], [InlineKeyboardButton(text="🔄 Обновить панель", callback_data="refresh_only")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="tp_menu")],
+        [InlineKeyboardButton(text="⚠️ Сбросить сессию", callback_data="reset_session")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_only")]
+    ])
     await cb.message.edit_reply_markup(reply_markup=kb)
+
+@dp.callback_query(F.data == "refresh_only")
+async def cb_refresh(cb: types.CallbackQuery):
+    await refresh_panels(); await cb.answer("Обновлено!")
+
+@dp.callback_query(F.data == "reset_session")
+async def cb_reset_s(cb: types.CallbackQuery):
+    global session_restarts; session_restarts = 0; await save_data(); await refresh_panels(); await cb.answer("Сессия сброшена")
 
 @dp.callback_query(F.data == "tp_menu")
 async def tp_menu(cb: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Создать", callback_data="tp_add"), InlineKeyboardButton(text="🗑 Удалить все", callback_data="tp_clear_all")], [InlineKeyboardButton(text="⬅️ Назад", callback_data="ask_reset")]])
-    await cb.message.edit_text("🛠 <b>Управление паузами:</b>", reply_markup=kb, parse_mode="HTML")
+    await cb.message.edit_text("🛠 <b>Паузы:</b>", reply_markup=kb, parse_mode="HTML")
 
 @dp.callback_query(F.data == "tp_add")
 async def tp_add_start(cb: types.CallbackQuery, state: FSMContext):
@@ -301,22 +320,22 @@ async def tp_add_start(cb: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data.startswith("target_"), TechPause.choosing_target)
 async def tp_target(cb: types.CallbackQuery, state: FSMContext):
     target = cb.data.replace("target_", ""); await state.update_data(target=target)
-    await cb.message.edit_text(f"На сколько минут поставить <b>{target}</b>?", parse_mode="HTML")
+    await cb.message.edit_text(f"Минут для <b>{target}</b>?", parse_mode="HTML")
     await state.set_state(TechPause.entering_time)
 
 @dp.message(TechPause.entering_time)
 async def tp_time(m: types.Message, state: FSMContext):
-    if not m.text.isdigit(): return await m.answer("Введи число!")
+    if not m.text.isdigit(): return
     mins = int(m.text); d = await state.get_data(); now = time.time()
     targets = list(notifications.keys()) if d['target'] == "all" else [d['target']]
     for t in targets: pause_data[t] = {"until": now + mins * 60, "auto_off": True}
-    await save_data(); await m.answer(f"✅ Пауза на {mins}м установлена."); await state.clear(); await refresh_panels()
+    await save_data(); await m.answer(f"✅ Пауза {mins}м."); await state.clear(); await refresh_panels()
 
 @dp.callback_query(F.data == "tp_clear_all")
 async def tp_clear(cb: types.CallbackQuery):
-    pause_data.clear(); await save_data(); await cb.answer("Паузы сброшены"); await refresh_panels()
+    pause_data.clear(); await save_data(); await cb.answer("Очищено"); await refresh_panels()
 
-# --- СЕРВЕР И МОНИТОРИНГ ---
+# --- СЕРВЕР ---
 async def handle_signal(request):
     try:
         d = await request.json(); u = d.get("username")
@@ -324,8 +343,12 @@ async def handle_signal(request):
             if u in pause_data and pause_data[u].get("auto_off"): pause_data.pop(u, None)
             if u not in start_times: start_times[u] = time.time()
             accounts[u] = time.time()
-            # ТЕСТОВАЯ ЗАПИСЬ РЕАЛЬНЫХ ДАННЫХ
-            raw_data_storage[u] = {"honey": d.get("honey", 0), "pollen": d.get("pollen", 0), "capacity": d.get("capacity", 1)}
+            # Интеграция данных мёда и рюкзака
+            p, c = d.get("pollen", 0), d.get("capacity", 1)
+            acc_stats[u] = {
+                "h": format_honey(d.get("honey", 0)),
+                "b": f"{int((p/c)*100)}%"
+            }
             return web.Response(text="OK")
     except: pass
     return web.Response(status=400)
@@ -338,13 +361,13 @@ async def check_timeouts():
             for cid in status_messages:
                 try: await bot.send_message(cid, f"🚨 <b>{u}</b> ВЫЛЕТ!\n{tags}", parse_mode="HTML")
                 except: pass
-            accounts.pop(u, None); start_times.pop(u, None)
+            accounts.pop(u, None); start_times.pop(u, None); acc_stats.pop(u, None)
     await save_data(); await refresh_panels()
 
 async def refresh_panels():
     txt = get_status_text(); kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚙️ Настройки", callback_data="ask_reset")]])
     for cid, mid in list(status_messages.items()):
-        try: await bot.edit_message_text(txt, chat_id=cid, message_id=mid, parse_mode="HTML", reply_markup=kb)
+        try: await bot.edit_message_text(txt, chat_id=int(cid), message_id=int(mid), parse_mode="HTML", reply_markup=kb)
         except: pass
 
 async def monitor_loop():
