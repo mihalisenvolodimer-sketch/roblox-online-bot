@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiohttp import web
 
 # --- Настройки ---
-VERSION = "V5.1 FIXED"
+VERSION = "V5.2 FINAL"
 TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 PORT = int(os.getenv("PORT", 8080))
@@ -102,7 +102,7 @@ async def save_data():
         }))
     except: pass
 
-# --- Отрисовка (Без эмодзи во избежание квадратов) ---
+# --- Отрисовка ---
 async def generate_status_image(target_accounts, is_online_mode=True):
     width, row_h, head_h, foot_h = 750, 115, 130, 80
     height = head_h + (max(1, len(target_accounts)) * row_h) + foot_h
@@ -159,7 +159,8 @@ def get_status_text():
 # --- Хендлеры ---
 @dp.message(Command("start"))
 async def cmd_start(m: types.Message):
-    await m.answer(f"<b>🐝 BSS {VERSION}</b>\n\n/information — Статус\n/img — Картинка\n/list — Пинги\n/add [Ник] [Тег]", parse_mode="HTML")
+    # Добавлено отображение общих рестартов
+    await m.answer(f"<b>🐝 BSS {VERSION}</b>\n🔄 Общих рестартов бота: <b>{total_restarts}</b>\n\n/information — Статус\n/img — Картинка\n/list — Пинги\n/add [Ник] [Тег]", parse_mode="HTML")
 
 @dp.message(Command("information"))
 async def cmd_info(m: types.Message):
@@ -189,7 +190,7 @@ async def cmd_img(m: types.Message):
 @dp.message(Command("list"))
 async def cmd_list(m: types.Message):
     if not notifications: return await m.answer("Список пингов пуст. Добавь их через /add!")
-    res = "<b>📜 Список уведомлений:</b>\n"
+    res = "<b>📜 Список уведомлений (Пинги):</b>\n"
     for acc, tags in notifications.items(): res += f"• <code>{acc}</code>: {', '.join(tags)}\n"
     await m.answer(res, parse_mode="HTML")
 
@@ -197,9 +198,20 @@ async def cmd_list(m: types.Message):
 async def cmd_add(m: types.Message):
     args = m.text.split()
     if len(args) < 2: return await m.answer("Формат: /add Ник @тег")
-    acc, tag = args[1], args[2] if len(args) > 2 else f"ID:{m.from_user.id}"
+    acc = args[1]
+    
+    # Если тег не указан, берем @username пользователя (или ID, если юзернейма нет)
+    if len(args) > 2:
+        tag = args[2]
+    else:
+        tag = f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}"
+        
     if acc not in notifications: notifications[acc] = []
-    notifications[acc].append(tag); await save_data(); await m.answer(f"✅ {acc} добавлен в базу.")
+    if tag not in notifications[acc]:
+        notifications[acc].append(tag)
+    
+    await save_data()
+    await m.answer(f"✅ <b>{acc}</b> добавлен в базу с пингом <b>{tag}</b>.", parse_mode="HTML")
 
 @dp.message(Command("remove"))
 async def cmd_remove(m: types.Message):
@@ -208,7 +220,7 @@ async def cmd_remove(m: types.Message):
     if args[1] in notifications:
         del notifications[args[1]]; await save_data(); await m.answer(f"❌ {args[1]} удален из базы.")
 
-# --- Админка (С Кнопкой Теста Вылета) ---
+# --- Админка ---
 @dp.message(Command("adm"))
 async def cmd_adm(m: types.Message):
     if m.from_user.username != ALLOWED_ADMIN: return
@@ -335,6 +347,7 @@ async def handle_signal(request):
             if u not in start_times: start_times[u] = time.time()
             accounts[u] = time.time()
             p, c = d.get("pollen", 0), d.get("capacity", 1)
+            # Если не хочешь чтобы было больше 100%, можно заменить на min(int((p/c)*100), 100)
             acc_stats[u] = {"h": format_honey(d.get("honey", 0)), "b": f"{int((p/c)*100)}%"}
             return web.Response(text="OK")
     except: pass
@@ -342,6 +355,12 @@ async def handle_signal(request):
 
 async def check_timeouts():
     now = time.time()
+    
+    # --- Очистка истекших пауз ---
+    expired_pauses = [u for u, pd in pause_data.items() if now >= pd.get('until', 0)]
+    for u in expired_pauses:
+        pause_data.pop(u, None)
+        
     for u in list(accounts.keys()):
         if now - accounts[u] > 120:
             tags = " ".join(notifications.get(u, ["!"]))
@@ -349,6 +368,7 @@ async def check_timeouts():
                 try: await bot.send_message(cid, f"🚨 <b>{u}</b> ВЫЛЕТ!\n{tags}", parse_mode="HTML")
                 except: pass
             accounts.pop(u, None); start_times.pop(u, None); acc_stats.pop(u, None)
+            
     await save_data(); await refresh_panels()
 
 async def refresh_panels():
