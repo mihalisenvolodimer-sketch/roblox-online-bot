@@ -15,7 +15,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 PORT = int(os.getenv("PORT", 8080))
 ALLOWED_ADMIN = "Gold_mod1" 
-DB_KEY = "BSS_V37_STABLE" # Тот самый стабильный ключ
+DB_KEY = "BSS_GLOBAL_DATABASE_PRO" # ВЕЧНЫЙ КЛЮЧ БАЗЫ ДАННЫХ
 FONT_PATH = "roboto_font.ttf"
 FONT_URL = "https://cdn.jsdelivr.net/gh/googlefonts/roboto@main/src/hinted/Roboto-Bold.ttf"
 
@@ -127,7 +127,6 @@ async def generate_status_image(target_accounts, is_online_mode=True):
             if av: img.paste(av.resize((85, 85)), (45, y+10), av.resize((85, 85)))
             draw.text((145, y+15), acc, font=f_m, fill=(255, 255, 255))
             st = acc_stats.get(acc, {"h": "0", "b": "0%"})
-            # Заменяем иконки на текст, чтобы не было квадратов
             draw.text((145, y+55), f"Honey: {st['h']} | Bag: {st['b']}", font=f_s, fill=(200, 200, 200))
             if acc in pause_data and now < pause_data[acc]['until']:
                 draw.text((width-220, y+35), "ПАУЗА", font=f_m, fill=(255, 165, 0))
@@ -189,7 +188,7 @@ async def cmd_img(m: types.Message):
 
 @dp.message(Command("list"))
 async def cmd_list(m: types.Message):
-    if not notifications: return await m.answer("Список пингов пуст (БД V37 активна).")
+    if not notifications: return await m.answer("Список пингов пуст. Добавь их через /add!")
     res = "<b>📜 Список уведомлений:</b>\n"
     for acc, tags in notifications.items(): res += f"• <code>{acc}</code>: {', '.join(tags)}\n"
     await m.answer(res, parse_mode="HTML")
@@ -200,14 +199,14 @@ async def cmd_add(m: types.Message):
     if len(args) < 2: return await m.answer("Формат: /add Ник @тег")
     acc, tag = args[1], args[2] if len(args) > 2 else f"ID:{m.from_user.id}"
     if acc not in notifications: notifications[acc] = []
-    notifications[acc].append(tag); await save_data(); await m.answer(f"✅ {acc} добавлен.")
+    notifications[acc].append(tag); await save_data(); await m.answer(f"✅ {acc} добавлен в базу.")
 
 @dp.message(Command("remove"))
 async def cmd_remove(m: types.Message):
     args = m.text.split()
     if len(args) < 2: return await m.answer("Ник?")
     if args[1] in notifications:
-        del notifications[args[1]]; await save_data(); await m.answer(f"❌ {args[1]} удален.")
+        del notifications[args[1]]; await save_data(); await m.answer(f"❌ {args[1]} удален из базы.")
 
 # --- Админка (С Кнопкой Теста Вылета) ---
 @dp.message(Command("adm"))
@@ -226,7 +225,7 @@ async def cb_test_dc(cb: types.CallbackQuery):
     accounts.pop(acc, None); await cb.answer(f"Тест: {acc} отключен!", show_alert=True)
     await refresh_panels()
 
-# --- Рассылка (Починена Кнопка Отмена) ---
+# --- Рассылка ---
 @dp.callback_query(F.data == "adm_broadcast")
 async def adm_bc(cb: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📝 С заголовком", callback_data="bc_t_yes"), InlineKeyboardButton(text="💬 Без", callback_data="bc_t_no")]])
