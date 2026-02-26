@@ -27,7 +27,7 @@ def log_act(m, action):
     logger.info(f"[USER_ACTION] {user} -> {action}")
 
 # --- Конфигурация ---
-VERSION = "V4.7"
+VERSION = "V4.8"
 TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 PORT = int(os.getenv("PORT", 8080))
@@ -44,8 +44,13 @@ accounts, start_times, notifications, status_messages = {}, {}, {}, {}
 pause_data = {} 
 total_restarts, session_restarts = 0, 0
 
-QUOTES = ["Пчёлы не спят, они фармят!", "Мёд сам себя не соберёт.", "Удачного фарма, легенда!"]
-BG_URLS = ["https://wallpaperaccess.com/full/7500647.png", "https://wallpaperaccess.com/full/14038149.jpg"]
+QUOTES = ["Пчёлы не спят, они фармят!", "Мёд сам себя не соберёт.", "Удачного фарма, легенда!", "Мониторинг на страже."]
+BG_URLS = [
+    "https://wallpaperaccess.com/full/7500647.png",
+    "https://wallpaperaccess.com/full/14038149.jpg",
+    "https://wallpaperaccess.com/full/14038208.jpg",
+    "https://wallpaperaccess.com/full/8221067.png"
+]
 
 class PostCreation(StatesGroup):
     waiting_for_content = State()
@@ -113,29 +118,52 @@ async def save_data():
     except: pass
 
 # --- ВИЗУАЛИЗАЦИЯ (/img) ---
-async def generate_status_image(target_accounts):
+async def generate_status_image(target_accounts, is_online_mode=True):
     width, row_h, head_h, foot_h = 750, 100, 130, 80
     height = head_h + (max(1, len(target_accounts)) * row_h) + foot_h
     img = Image.new("RGBA", (width, height), (30, 30, 30, 255))
+    
+    # Загрузка случайного фона
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(random.choice(BG_URLS), timeout=5) as r:
+                if r.status == 200:
+                    bg = Image.open(io.BytesIO(await r.read())).convert("RGBA")
+                    bg_w, bg_h = bg.size
+                    ratio = max(width/bg_w, height/bg_h)
+                    bg = bg.resize((int(bg_w*ratio), int(bg_h*ratio)), Image.LANCZOS)
+                    img.paste(bg, (0, 0))
+    except Exception as e: logger.error(f"Фон не загружен: {e}")
+    
     draw = ImageDraw.Draw(img)
     try:
-        f_l, f_m, f_s = ImageFont.truetype(FONT_PATH, 42), ImageFont.truetype(FONT_PATH, 28), ImageFont.truetype(FONT_PATH, 20)
+        f_l = ImageFont.truetype(FONT_PATH, 42)
+        f_m = ImageFont.truetype(FONT_PATH, 28)
+        f_s = ImageFont.truetype(FONT_PATH, 20)
     except: f_l = f_m = f_s = ImageFont.load_default()
     
-    draw.text((45, 45), "МОНИТОРИНГ УЛЬЯ", font=f_l, fill=(255, 255, 255))
+    title = "ОНЛАЙН МОНИТОРИНГ" if is_online_mode else "ПЛАН МАКРОСА"
+    draw.text((45, 45), title, font=f_l, fill=(255, 255, 255), stroke_width=2, stroke_fill=(0,0,0))
+    
     now = time.time()
-    async with aiohttp.ClientSession() as session:
-        for i, acc in enumerate(target_accounts):
-            y = head_h + (i * row_h)
-            draw.rounded_rectangle([35, y, width-35, y+row_h-15], fill=(20, 20, 20, 200), radius=10)
-            av = await get_roblox_avatar(acc, session)
-            if av: img.paste(av.resize((70, 70)), (50, y+8), av.resize((70, 70)))
-            draw.text((140, y+22), acc, font=f_m, fill=(255, 255, 255))
-            if acc in pause_data and now < pause_data[acc]['until']:
-                draw.text((width-240, y+22), "ТЕХ. ПЕРЕРЫВ", font=f_m, fill=(255, 165, 0))
-            elif acc in accounts:
-                dur = int(now - start_times.get(acc, now))
-                draw.text((width-180, y+22), f"{dur//3600}ч {(dur%3600)//60}м", font=f_m, fill=(0, 255, 0))
+    if target_accounts:
+        async with aiohttp.ClientSession() as session:
+            for i, acc in enumerate(target_accounts):
+                y = head_h + (i * row_h)
+                draw.rounded_rectangle([35, y, width-35, y+row_h-15], fill=(0, 0, 0, 170), radius=15)
+                av = await get_roblox_avatar(acc, session)
+                if av: img.paste(av.resize((70, 70)), (50, y+8), av.resize((70, 70)))
+                draw.text((140, y+22), acc, font=f_m, fill=(255, 255, 255))
+                
+                if acc in pause_data and now < pause_data[acc]['until']:
+                    draw.text((width-240, y+22), "ТЕХ. ПЕРЕРЫВ", font=f_m, fill=(255, 180, 50))
+                elif is_online_mode and acc in accounts:
+                    dur = int(now - start_times.get(acc, now))
+                    draw.text((width-200, y+22), f"{dur//3600}ч {(dur%3600)//60}м", font=f_m, fill=(100, 255, 100))
+                else:
+                    draw.text((width-210, y+22), "ОЖИДАНИЕ", font=f_m, fill=(200, 200, 200))
+                    
+    draw.text((45, height-50), random.choice(QUOTES), font=f_s, fill=(220, 220, 220), stroke_width=1, stroke_fill=(0,0,0))
     buf = io.BytesIO(); img.save(buf, format='PNG'); return buf.getvalue()
 
 def get_status_text():
@@ -166,14 +194,19 @@ async def cmd_start(m: types.Message):
 @dp.message(Command("img"))
 async def cmd_img(m: types.Message):
     log_act(m, "Команда /img")
-    t_accs = list(set(list(accounts.keys()) + list(pause_data.keys())))
-    if not t_accs: return await m.answer("Нет активных аккаунтов.")
-    msg = await m.answer("🎨 Рисую...")
+    args = m.text.split()[1:]
+    is_on = len(args) == 0
+    t_accs = list(set(list(accounts.keys()) + list(pause_data.keys()))) if is_on else args
+    if not t_accs: return await m.answer("Нет аккаунтов для отрисовки.")
+    
+    msg = await m.answer("🎨 Отрисовываю...")
     try:
-        img = await generate_status_image(t_accs)
-        await m.answer_photo(photo=BufferedInputFile(img, filename="s.png"))
+        img_bytes = await generate_status_image(t_accs, is_online_mode=is_on)
+        await m.answer_photo(photo=BufferedInputFile(file=img_bytes, filename="bss.png"))
         await msg.delete()
-    except Exception as e: await msg.edit_text(f"Ошибка: {e}")
+    except Exception as e: 
+        logger.error(f"Ошибка img: {e}")
+        await msg.edit_text(f"Ошибка: {e}")
 
 @dp.message(Command("information"))
 async def cmd_info(m: types.Message):
