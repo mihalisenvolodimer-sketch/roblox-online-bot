@@ -27,7 +27,7 @@ def log_act(m, action):
     logger.info(f"[USER_ACTION] {user} -> {action}")
 
 # --- Конфигурация ---
-VERSION = "V4.8"
+VERSION = "V4.9"
 TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 PORT = int(os.getenv("PORT", 8080))
@@ -53,7 +53,10 @@ BG_URLS = [
 ]
 
 class PostCreation(StatesGroup):
-    waiting_for_content = State()
+    waiting_for_title = State()
+    waiting_for_text = State()
+    waiting_for_photo = State()
+    confirming = State()
 
 class TechPause(StatesGroup):
     choosing_target = State()
@@ -123,7 +126,6 @@ async def generate_status_image(target_accounts, is_online_mode=True):
     height = head_h + (max(1, len(target_accounts)) * row_h) + foot_h
     img = Image.new("RGBA", (width, height), (30, 30, 30, 255))
     
-    # Загрузка случайного фона
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(random.choice(BG_URLS), timeout=5) as r:
@@ -133,7 +135,7 @@ async def generate_status_image(target_accounts, is_online_mode=True):
                     ratio = max(width/bg_w, height/bg_h)
                     bg = bg.resize((int(bg_w*ratio), int(bg_h*ratio)), Image.LANCZOS)
                     img.paste(bg, (0, 0))
-    except Exception as e: logger.error(f"Фон не загружен: {e}")
+    except: pass
     
     draw = ImageDraw.Draw(img)
     try:
@@ -204,9 +206,7 @@ async def cmd_img(m: types.Message):
         img_bytes = await generate_status_image(t_accs, is_online_mode=is_on)
         await m.answer_photo(photo=BufferedInputFile(file=img_bytes, filename="bss.png"))
         await msg.delete()
-    except Exception as e: 
-        logger.error(f"Ошибка img: {e}")
-        await msg.edit_text(f"Ошибка: {e}")
+    except Exception as e: await msg.edit_text(f"Ошибка: {e}")
 
 @dp.message(Command("information"))
 async def cmd_info(m: types.Message):
@@ -252,7 +252,7 @@ async def cmd_remove(m: types.Message):
         del notifications[acc]; await save_data(); await m.answer(f"❌ {acc} удален.")
     else: await m.answer("Ник не найден.")
 
-# --- АДМИНКА ---
+# --- ПОЛНАЯ АДМИНКА (С РАССЫЛКОЙ) ---
 @dp.message(Command("adm"))
 async def cmd_adm(m: types.Message):
     if m.from_user.username != ALLOWED_ADMIN: return
@@ -265,22 +265,92 @@ async def cmd_adm(m: types.Message):
 
 @dp.callback_query(F.data == "adm_upd")
 async def adm_upd(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.edit_text("Отправьте сообщение для рассылки всем чатам:"); await state.set_state(PostCreation.waiting_for_content)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 С заголовком", callback_data="post_title_yes")],
+        [InlineKeyboardButton(text="💬 Без заголовка", callback_data="post_title_no")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="post_cancel")]
+    ])
+    await cb.message.edit_text("Выберите формат рассылки:", reply_markup=kb)
 
-@dp.message(PostCreation.waiting_for_content)
-async def broadcast_exec(m: types.Message, state: FSMContext):
-    log_act(m, "Запуск рассылки")
+@dp.callback_query(F.data == "post_title_yes")
+async def post_ty(cb: types.CallbackQuery, state: FSMContext):
+    await state.update_data(has_title=True)
+    await cb.message.edit_text("Введите заголовок:"); await state.set_state(PostCreation.waiting_for_title)
+
+@dp.callback_query(F.data == "post_title_no")
+async def post_tn(cb: types.CallbackQuery, state: FSMContext):
+    await state.update_data(has_title=False)
+    await cb.message.edit_text("Введите текст (он будет оформлен в цитату):"); await state.set_state(PostCreation.waiting_for_text)
+
+@dp.callback_query(F.data == "post_cancel")
+async def post_cancel(cb: types.CallbackQuery, state: FSMContext):
+    await cb.message.edit_text("❌ Действие отменено."); await state.clear()
+
+@dp.message(PostCreation.waiting_for_title)
+async def post_get_title(m: types.Message, state: FSMContext):
+    await state.update_data(title=m.text)
+    await m.answer("Отлично. Теперь введите текст рассылки:"); await state.set_state(PostCreation.waiting_for_text)
+
+@dp.message(PostCreation.waiting_for_text)
+async def post_get_text(m: types.Message, state: FSMContext):
+    await state.update_data(text=m.text)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Без картинки", callback_data="post_skip_photo")]])
+    await m.answer("Теперь отправьте картинку (или нажмите 'Без картинки'):", reply_markup=kb)
+    await state.set_state(PostCreation.waiting_for_photo)
+
+@dp.message(PostCreation.waiting_for_photo, F.photo)
+async def post_get_photo(m: types.Message, state: FSMContext):
+    await state.update_data(photo_id=m.photo[-1].file_id)
+    await show_preview(m, state)
+
+@dp.callback_query(PostCreation.waiting_for_photo, F.data == "post_skip_photo")
+async def post_skip_photo(cb: types.CallbackQuery, state: FSMContext):
+    await state.update_data(photo_id=None)
+    await show_preview(cb.message, state)
+
+async def show_preview(m, state: FSMContext):
+    data = await state.get_data()
+    text = f"<blockquote>{data['text']}</blockquote>"
+    if data.get("has_title"):
+        text = f"📢 <b>{data['title']}</b>\n\n{text}"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отправить всем", callback_data="post_confirm_yes")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="post_cancel")]
+    ])
+    
+    chat_id = m.chat.id
+    if data.get("photo_id"):
+        await bot.send_photo(chat_id, data["photo_id"], caption=text, parse_mode="HTML", reply_markup=kb)
+    else:
+        await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
+    await state.set_state(PostCreation.confirming)
+
+@dp.callback_query(PostCreation.confirming, F.data == "post_confirm_yes")
+async def post_send_all(cb: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    text = f"<blockquote>{data['text']}</blockquote>"
+    if data.get("has_title"): text = f"📢 <b>{data['title']}</b>\n\n{text}"
+    
     count = 0
+    # Отправляем во все чаты, где висит панель /information
     for cid in status_messages:
-        try: await bot.send_message(chat_id=cid, text=f"📢 <b>ОБНОВЛЕНИЕ / НОВОСТИ:</b>\n\n{m.text}", parse_mode="HTML"); count += 1
+        try:
+            if data.get("photo_id"): await bot.send_photo(cid, data["photo_id"], caption=text, parse_mode="HTML")
+            else: await bot.send_message(cid, text, parse_mode="HTML")
+            count += 1
         except: pass
-    await m.answer(f"Успешно отправлено в {count} чатов."); await state.clear()
+    
+    log_act(cb, f"Успешная рассылка в {count} чатов.")
+    await bot.send_message(cb.message.chat.id, f"✅ Успешно разослано в {count} чатов.")
+    await state.clear()
 
 @dp.callback_query(F.data == "adm_test")
 async def adm_test(cb: types.CallbackQuery):
     if not accounts: return await cb.answer("Никто не онлайн", show_alert=True)
     acc = list(accounts.keys())[0]
     accounts[acc] = time.time() - 300
+    log_act(cb, f"Тест вылета запущен для {acc}")
     await cb.answer(f"Тест вылета запущен для {acc}"); await check_timeouts()
 
 # --- ТЕХПЕРЕРЫВ ---
@@ -321,7 +391,7 @@ async def tp_time(m: types.Message, state: FSMContext):
 @dp.callback_query(TechPause.choosing_auto_off)
 async def tp_final(cb: types.CallbackQuery, state: FSMContext):
     d = await state.get_data(); auto = cb.data == "auto_yes"
-    log_act(cb, f"Финальная настройка паузы: {d['target']} на {d['mins']}м")
+    log_act(cb, f"Настройка паузы: {d['target']} на {d['mins']}м")
     t_list = list(notifications.keys()) if d['target'] == "ALL" else [d['target']]
     now = time.time()
     for t in t_list:
@@ -365,6 +435,7 @@ async def refresh_panels():
         except: pass
 
 async def handle_signal(request):
+    # Эта функция полностью "тихая". В консоль ничего не пишется при приходе сигнала, чтобы избежать спама.
     try:
         d = await request.json(); u = d.get("username")
         if u:
