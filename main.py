@@ -9,12 +9,13 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiohttp import web
 
-# --- Конфигурация ---
-VERSION = "V5.0 RELEASE"
+# --- Настройки ---
+VERSION = "V5.1 FIXED"
 TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 PORT = int(os.getenv("PORT", 8080))
 ALLOWED_ADMIN = "Gold_mod1" 
+DB_KEY = "BSS_V37_STABLE" # Тот самый стабильный ключ
 FONT_PATH = "roboto_font.ttf"
 FONT_URL = "https://cdn.jsdelivr.net/gh/googlefonts/roboto@main/src/hinted/Roboto-Bold.ttf"
 
@@ -27,8 +28,7 @@ db = None
 
 # Глобальные данные
 accounts, start_times, notifications, status_messages = {}, {}, {}, {}
-pause_data = {} 
-acc_stats = {} # Хранение мёда и рюкзака
+pause_data, acc_stats = {}, {}
 total_restarts, session_restarts = 0, 0
 
 BG_URLS = ["https://wallpaperaccess.com/full/7500647.png", "https://wallpaperaccess.com/full/14038208.jpg"]
@@ -37,9 +37,9 @@ class PostCreation(StatesGroup):
     waiting_for_title = State(); waiting_for_text = State(); waiting_for_photo = State(); confirming = State()
 
 class TechPause(StatesGroup):
-    choosing_target = State(); entering_time = State(); choosing_auto_off = State()
+    choosing_target = State(); entering_time = State()
 
-# --- Утилиты ---
+# --- Вспомогательные функции ---
 def format_honey(n):
     if n is None: return "0"
     try:
@@ -59,7 +59,7 @@ async def download_font():
                         with open(FONT_PATH, "wb") as f: f.write(await r.read())
         except: pass
 
-async def get_roblox_avatar(username, session):
+async def get_avatar(username, session):
     try:
         async with session.post("https://users.roblox.com/v1/usernames/users", json={"usernames": [username], "excludeBannedUsers": False}) as resp:
             uid = (await resp.json())["data"][0]["id"]
@@ -70,13 +70,13 @@ async def get_roblox_avatar(username, session):
             return Image.open(io.BytesIO(await resp.read())).convert("RGBA")
     except: return None
 
-# --- База Данных (Старый Ключ Возвращен) ---
+# --- База Данных ---
 async def load_data():
     global db, notifications, status_messages, total_restarts, session_restarts, start_times, accounts, pause_data
     if not REDIS_URL: return
     try:
         db = redis.from_url(REDIS_URL, decode_responses=True)
-        raw = await db.get("BSS_V4_STABLE") # Твой старый ключ базы
+        raw = await db.get(DB_KEY)
         if raw:
             data = json.loads(raw)
             notifications.update(data.get("notifs", {}))
@@ -95,19 +95,18 @@ async def load_data():
 async def save_data():
     if not db: return
     try:
-        await db.set("BSS_V4_STABLE", json.dumps({
+        await db.set(DB_KEY, json.dumps({
             "notifs": notifications, "msgs": status_messages, "total_restarts": total_restarts,
             "session_restarts": session_restarts, "starts": start_times, "accounts": accounts,
             "pause_data": pause_data
         }))
     except: pass
 
-# --- Визуализация ---
+# --- Отрисовка (Без эмодзи во избежание квадратов) ---
 async def generate_status_image(target_accounts, is_online_mode=True):
     width, row_h, head_h, foot_h = 750, 115, 130, 80
     height = head_h + (max(1, len(target_accounts)) * row_h) + foot_h
     img = Image.new("RGBA", (width, height), (40, 40, 40, 255))
-    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(random.choice(BG_URLS)) as r:
@@ -115,35 +114,28 @@ async def generate_status_image(target_accounts, is_online_mode=True):
                 bg = bg.resize((width, height), Image.LANCZOS)
                 img.paste(bg, (0, 0))
     except: pass
-    
     draw = ImageDraw.Draw(img)
-    try: f_l, f_m, f_s = ImageFont.truetype(FONT_PATH, 42), ImageFont.truetype(FONT_PATH, 28), ImageFont.truetype(FONT_PATH, 18)
+    try: f_l = ImageFont.truetype(FONT_PATH, 42); f_m = ImageFont.truetype(FONT_PATH, 28); f_s = ImageFont.truetype(FONT_PATH, 18)
     except: f_l = f_m = f_s = ImageFont.load_default()
-    
     draw.text((45, 40), "ОНЛАЙН МОНИТОРИНГ", font=f_l, fill=(255, 255, 255), stroke_width=2, stroke_fill=(0,0,0))
-    
     now = time.time()
     async with aiohttp.ClientSession() as session:
         for i, acc in enumerate(target_accounts):
             y = head_h + (i * row_h)
             draw.rounded_rectangle([30, y, width-30, y+row_h-10], fill=(0, 0, 0, 180), radius=15)
-            av = await get_roblox_avatar(acc, session)
+            av = await get_avatar(acc, session)
             if av: img.paste(av.resize((85, 85)), (45, y+10), av.resize((85, 85)))
-            
             draw.text((145, y+15), acc, font=f_m, fill=(255, 255, 255))
-            
-            # Статистика под ником на картинке
             st = acc_stats.get(acc, {"h": "0", "b": "0%"})
-            draw.text((145, y+55), f"🍯 {st['h']} | 🎒 {st['b']}", font=f_s, fill=(200, 200, 200))
-            
+            # Заменяем иконки на текст, чтобы не было квадратов
+            draw.text((145, y+55), f"Honey: {st['h']} | Bag: {st['b']}", font=f_s, fill=(200, 200, 200))
             if acc in pause_data and now < pause_data[acc]['until']:
                 draw.text((width-220, y+35), "ПАУЗА", font=f_m, fill=(255, 165, 0))
             elif is_online_mode and acc in accounts:
                 dur = int(now - start_times.get(acc, now))
                 draw.text((width-200, y+35), f"{dur//3600}ч {(dur%3600)//60}м", font=f_m, fill=(100, 255, 100))
             else:
-                draw.text((width-210, y+35), "ОЖИДАНИЕ", font=f_m, fill=(180, 180, 180))
-                    
+                draw.text((width-210, y+35), "WAITING", font=f_m, fill=(180, 180, 180))
     buf = io.BytesIO(); img.save(buf, format='PNG'); return buf.getvalue()
 
 def get_status_text():
@@ -151,9 +143,8 @@ def get_status_text():
     now = time.time()
     text = f"<b>🐝 Улей BSS {VERSION}</b>\n🕒 Время: <b>{now_str}</b>\n"
     text += f"🔄 Рестартов: <b>{session_restarts}</b> (Всего: {total_restarts})\n\n"
-    
     acc_list = sorted(list(set(list(accounts.keys()) + list(pause_data.keys()))))
-    if not acc_list: text += "<blockquote>Сигналов нет...</blockquote>"
+    if not acc_list: text += "<blockquote>Ожидание сигналов...</blockquote>"
     else:
         for u in acc_list:
             if u in pause_data and now < pause_data[u]['until']:
@@ -166,10 +157,10 @@ def get_status_text():
                 text += f"└ 🕒 <b>{d//3600}ч {(d%3600)//60}м в сети</b>\n\n"
     return text
 
-# --- ХЕНДЛЕРЫ ---
+# --- Хендлеры ---
 @dp.message(Command("start"))
 async def cmd_start(m: types.Message):
-    await m.answer(f"<b>🐝 BSS {VERSION}</b>\n\n/information — Статус\n/img — Картинка\n/list — Пинги\n/add [Ник] [Тег]\n/test_dc — Тест вылета", parse_mode="HTML")
+    await m.answer(f"<b>🐝 BSS {VERSION}</b>\n\n/information — Статус\n/img — Картинка\n/list — Пинги\n/add [Ник] [Тег]", parse_mode="HTML")
 
 @dp.message(Command("information"))
 async def cmd_info(m: types.Message):
@@ -179,17 +170,9 @@ async def cmd_info(m: types.Message):
         except: pass
     msg = await m.answer(get_status_text(), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚙️ Настройки", callback_data="ask_reset")]]))
     status_messages[cid] = msg.message_id
-    # Авто-закреп
     try: await bot.pin_chat_message(chat_id=m.chat.id, message_id=msg.message_id, disable_notification=True)
     except: pass
     await save_data()
-
-@dp.message(Command("test_dc"))
-async def cmd_test_dc(m: types.Message):
-    if not accounts: return await m.answer("Нет аккаунтов в сети.")
-    acc = list(accounts.keys())[0]
-    accounts.pop(acc, None)
-    await m.answer(f"🧪 Тест вылета запущен для {acc}. Жди 30 сек.")
 
 @dp.message(Command("img"))
 async def cmd_img(m: types.Message):
@@ -206,7 +189,7 @@ async def cmd_img(m: types.Message):
 
 @dp.message(Command("list"))
 async def cmd_list(m: types.Message):
-    if not notifications: return await m.answer("Список пингов пуст.")
+    if not notifications: return await m.answer("Список пингов пуст (БД V37 активна).")
     res = "<b>📜 Список уведомлений:</b>\n"
     for acc, tags in notifications.items(): res += f"• <code>{acc}</code>: {', '.join(tags)}\n"
     await m.answer(res, parse_mode="HTML")
@@ -214,29 +197,38 @@ async def cmd_list(m: types.Message):
 @dp.message(Command("add"))
 async def cmd_add(m: types.Message):
     args = m.text.split()
-    if len(args) < 2: return await m.answer("Напиши: /add Ник @тег")
+    if len(args) < 2: return await m.answer("Формат: /add Ник @тег")
     acc, tag = args[1], args[2] if len(args) > 2 else f"ID:{m.from_user.id}"
     if acc not in notifications: notifications[acc] = []
-    notifications[acc].append(tag); await save_data()
-    await m.answer(f"✅ {acc} добавлен.")
+    notifications[acc].append(tag); await save_data(); await m.answer(f"✅ {acc} добавлен.")
 
 @dp.message(Command("remove"))
 async def cmd_remove(m: types.Message):
     args = m.text.split()
-    if len(args) < 2: return await m.answer("Кого удалить?")
+    if len(args) < 2: return await m.answer("Ник?")
     if args[1] in notifications:
-        del notifications[args[1]]; await save_data()
-        await m.answer(f"❌ {args[1]} удален.")
+        del notifications[args[1]]; await save_data(); await m.answer(f"❌ {args[1]} удален.")
 
-# --- АДМИНКА И РАССЫЛКА (ФИКСЫ) ---
+# --- Админка (С Кнопкой Теста Вылета) ---
 @dp.message(Command("adm"))
 async def cmd_adm(m: types.Message):
     if m.from_user.username != ALLOWED_ADMIN: return
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
+        [InlineKeyboardButton(text="🧪 Тест вылета", callback_data="adm_test_dc")]
+    ])
     await m.answer("🕹 <b>Панель администратора:</b>", reply_markup=kb, parse_mode="HTML")
 
+@dp.callback_query(F.data == "adm_test_dc")
+async def cb_test_dc(cb: types.CallbackQuery):
+    if not accounts: return await cb.answer("Нет аккаунтов онлайн!", show_alert=True)
+    acc = list(accounts.keys())[0]
+    accounts.pop(acc, None); await cb.answer(f"Тест: {acc} отключен!", show_alert=True)
+    await refresh_panels()
+
+# --- Рассылка (Починена Кнопка Отмена) ---
 @dp.callback_query(F.data == "adm_broadcast")
-async def adm_bc(cb: types.CallbackQuery, state: FSMContext):
+async def adm_bc(cb: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📝 С заголовком", callback_data="bc_t_yes"), InlineKeyboardButton(text="💬 Без", callback_data="bc_t_no")]])
     await cb.message.edit_text("Выберите формат сообщения:", reply_markup=kb)
 
@@ -281,13 +273,13 @@ async def bc_send(cb: types.CallbackQuery, state: FSMContext):
             if d.get("photo_id"): await bot.send_photo(cid, d["photo_id"], caption=text, parse_mode="HTML")
             else: await bot.send_message(cid, text, parse_mode="HTML")
         except: pass
-    await cb.message.answer("✅ Рассылка завершена."); await state.clear()
+    await cb.message.answer("✅ Отправлено."); await state.clear()
 
 @dp.callback_query(F.data == "bc_cancel")
 async def bc_cancel(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear(); await cb.message.delete(); await cb.answer("Отменено")
+    await state.clear(); await cb.message.delete(); await cb.answer("Рассылка отменена")
 
-# --- НАСТРОЙКИ И ТЕХПЕРЕРЫВ ---
+# --- Настройки ---
 @dp.callback_query(F.data == "ask_reset")
 async def tech_root(cb: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -299,7 +291,7 @@ async def tech_root(cb: types.CallbackQuery):
 
 @dp.callback_query(F.data == "refresh_only")
 async def cb_refresh(cb: types.CallbackQuery):
-    await refresh_panels(); await cb.answer("Обновлено!")
+    await refresh_panels(); await cb.answer("Данные обновлены!")
 
 @dp.callback_query(F.data == "reset_session")
 async def cb_reset_s(cb: types.CallbackQuery):
@@ -335,7 +327,7 @@ async def tp_time(m: types.Message, state: FSMContext):
 async def tp_clear(cb: types.CallbackQuery):
     pause_data.clear(); await save_data(); await cb.answer("Очищено"); await refresh_panels()
 
-# --- СЕРВЕР ---
+# --- Логика сервера ---
 async def handle_signal(request):
     try:
         d = await request.json(); u = d.get("username")
@@ -343,12 +335,8 @@ async def handle_signal(request):
             if u in pause_data and pause_data[u].get("auto_off"): pause_data.pop(u, None)
             if u not in start_times: start_times[u] = time.time()
             accounts[u] = time.time()
-            # Интеграция данных мёда и рюкзака
             p, c = d.get("pollen", 0), d.get("capacity", 1)
-            acc_stats[u] = {
-                "h": format_honey(d.get("honey", 0)),
-                "b": f"{int((p/c)*100)}%"
-            }
+            acc_stats[u] = {"h": format_honey(d.get("honey", 0)), "b": f"{int((p/c)*100)}%"}
             return web.Response(text="OK")
     except: pass
     return web.Response(status=400)
