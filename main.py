@@ -10,12 +10,12 @@ from aiogram.fsm.context import FSMContext
 from aiohttp import web
 
 # --- Настройки ---
-VERSION = "V5.2 FINAL"
+VERSION = "V5.4 TOTAL"
 TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 PORT = int(os.getenv("PORT", 8080))
 ALLOWED_ADMIN = "Gold_mod1" 
-DB_KEY = "BSS_GLOBAL_DATABASE_PRO" # ВЕЧНЫЙ КЛЮЧ БАЗЫ ДАННЫХ
+DB_KEY = "BSS_GLOBAL_DATABASE_PRO" 
 FONT_PATH = "roboto_font.ttf"
 FONT_URL = "https://cdn.jsdelivr.net/gh/googlefonts/roboto@main/src/hinted/Roboto-Bold.ttf"
 
@@ -37,7 +37,7 @@ class PostCreation(StatesGroup):
     waiting_for_title = State(); waiting_for_text = State(); waiting_for_photo = State(); confirming = State()
 
 class TechPause(StatesGroup):
-    choosing_target = State(); entering_time = State()
+    choosing_target = State(); entering_time = State(); choosing_mode = State()
 
 # --- Вспомогательные функции ---
 def format_honey(n):
@@ -148,7 +148,8 @@ def get_status_text():
         for u in acc_list:
             if u in pause_data and now < pause_data[u]['until']:
                 rem = int(pause_data[u]['until'] - now)
-                text += f"🛠 <code>{u}</code> | <b>ПАУЗА ({rem//60}м)</b>\n"
+                mode = "A" if pause_data[u].get("auto_off") else "H"
+                text += f"🛠 <code>{u}</code> | <b>ПАУЗА ({mode}) {rem//60}м</b>\n"
             elif u in accounts:
                 d = int(now - start_times.get(u, now))
                 st = acc_stats.get(u, {"h": "0", "b": "0%"})
@@ -159,7 +160,6 @@ def get_status_text():
 # --- Хендлеры ---
 @dp.message(Command("start"))
 async def cmd_start(m: types.Message):
-    # Добавлено отображение общих рестартов
     await m.answer(f"<b>🐝 BSS {VERSION}</b>\n🔄 Общих рестартов бота: <b>{total_restarts}</b>\n\n/information — Статус\n/img — Картинка\n/list — Пинги\n/add [Ник] [Тег]", parse_mode="HTML")
 
 @dp.message(Command("information"))
@@ -176,68 +176,45 @@ async def cmd_info(m: types.Message):
 
 @dp.message(Command("img"))
 async def cmd_img(m: types.Message):
-    args = m.text.split()[1:]
-    is_on = len(args) == 0
+    args = m.text.split()[1:]; is_on = len(args) == 0
     t_accs = list(set(list(accounts.keys()) + list(pause_data.keys()))) if is_on else args
     if not t_accs: return await m.answer("Список пуст.")
-    msg = await m.answer("🎨 Рисую...")
-    try:
-        img_bytes = await generate_status_image(t_accs, is_online_mode=is_on)
-        await m.answer_photo(photo=BufferedInputFile(file=img_bytes, filename="bss.png"))
-        await msg.delete()
-    except Exception as e: await msg.edit_text(f"Ошибка: {e}")
+    msg = await m.answer("🎨 Рисую..."); img_bytes = await generate_status_image(t_accs, is_online_mode=is_on)
+    await m.answer_photo(photo=BufferedInputFile(file=img_bytes, filename="bss.png")); await msg.delete()
 
 @dp.message(Command("list"))
 async def cmd_list(m: types.Message):
-    if not notifications: return await m.answer("Список пингов пуст. Добавь их через /add!")
+    if not notifications: return await m.answer("Список пингов пуст.")
     res = "<b>📜 Список уведомлений (Пинги):</b>\n"
     for acc, tags in notifications.items(): res += f"• <code>{acc}</code>: {', '.join(tags)}\n"
     await m.answer(res, parse_mode="HTML")
 
 @dp.message(Command("add"))
 async def cmd_add(m: types.Message):
-    args = m.text.split()
-    if len(args) < 2: return await m.answer("Формат: /add Ник @тег")
-    acc = args[1]
-    
-    # Если тег не указан, берем @username пользователя (или ID, если юзернейма нет)
-    if len(args) > 2:
-        tag = args[2]
-    else:
-        tag = f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}"
-        
+    args = m.text.split(); acc = args[1] if len(args) > 1 else None
+    if not acc: return await m.answer("Формат: /add Ник @тег")
+    tag = args[2] if len(args) > 2 else (f"@{m.from_user.username}" if m.from_user.username else f"ID:{m.from_user.id}")
     if acc not in notifications: notifications[acc] = []
-    if tag not in notifications[acc]:
-        notifications[acc].append(tag)
-    
-    await save_data()
-    await m.answer(f"✅ <b>{acc}</b> добавлен в базу с пингом <b>{tag}</b>.", parse_mode="HTML")
+    if tag not in notifications[acc]: notifications[acc].append(tag)
+    await save_data(); await m.answer(f"✅ <b>{acc}</b> добавлен с пингом <b>{tag}</b>.", parse_mode="HTML")
 
 @dp.message(Command("remove"))
 async def cmd_remove(m: types.Message):
-    args = m.text.split()
-    if len(args) < 2: return await m.answer("Ник?")
-    if args[1] in notifications:
-        del notifications[args[1]]; await save_data(); await m.answer(f"❌ {args[1]} удален из базы.")
+    args = m.text.split(); acc = args[1] if len(args) > 1 else None
+    if acc in notifications: del notifications[acc]; await save_data(); await m.answer(f"❌ {acc} удален.")
 
-# --- Админка ---
+# --- Админка (Рассылка) ---
 @dp.message(Command("adm"))
 async def cmd_adm(m: types.Message):
     if m.from_user.username != ALLOWED_ADMIN: return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
-        [InlineKeyboardButton(text="🧪 Тест вылета", callback_data="adm_test_dc")]
-    ])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")], [InlineKeyboardButton(text="🧪 Тест вылета", callback_data="adm_test_dc")]])
     await m.answer("🕹 <b>Панель администратора:</b>", reply_markup=kb, parse_mode="HTML")
 
 @dp.callback_query(F.data == "adm_test_dc")
 async def cb_test_dc(cb: types.CallbackQuery):
     if not accounts: return await cb.answer("Нет аккаунтов онлайн!", show_alert=True)
-    acc = list(accounts.keys())[0]
-    accounts.pop(acc, None); await cb.answer(f"Тест: {acc} отключен!", show_alert=True)
-    await refresh_panels()
+    acc = list(accounts.keys())[0]; accounts.pop(acc, None); await cb.answer(f"Тест: {acc} отключен!", show_alert=True); await refresh_panels()
 
-# --- Рассылка ---
 @dp.callback_query(F.data == "adm_broadcast")
 async def adm_bc(cb: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📝 С заголовком", callback_data="bc_t_yes"), InlineKeyboardButton(text="💬 Без", callback_data="bc_t_no")]])
@@ -245,8 +222,7 @@ async def adm_bc(cb: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("bc_t_"))
 async def bc_step1(cb: types.CallbackQuery, state: FSMContext):
-    use_t = cb.data == "bc_t_yes"
-    await state.update_data(has_title=use_t)
+    use_t = cb.data == "bc_t_yes"; await state.update_data(has_title=use_t)
     await cb.message.edit_text("Введите заголовок:" if use_t else "Введите текст:")
     await state.set_state(PostCreation.waiting_for_title if use_t else PostCreation.waiting_for_text)
 
@@ -286,27 +262,19 @@ async def bc_send(cb: types.CallbackQuery, state: FSMContext):
         except: pass
     await cb.message.answer("✅ Отправлено."); await state.clear()
 
-@dp.callback_query(F.data == "bc_cancel")
-async def bc_cancel(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear(); await cb.message.delete(); await cb.answer("Рассылка отменена")
-
-# --- Настройки ---
+# --- Настройки и Тех Перерыв ---
 @dp.callback_query(F.data == "ask_reset")
 async def tech_root(cb: types.CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="tp_menu")],
-        [InlineKeyboardButton(text="⚠️ Сбросить сессию", callback_data="reset_session")],
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_only")]
-    ])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="tp_menu")], [InlineKeyboardButton(text="⚠️ Сбросить сессию", callback_data="reset_session")], [InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_only")]])
     await cb.message.edit_reply_markup(reply_markup=kb)
 
 @dp.callback_query(F.data == "refresh_only")
 async def cb_refresh(cb: types.CallbackQuery):
-    await refresh_panels(); await cb.answer("Данные обновлены!")
+    await refresh_panels(); await cb.answer("Обновлено!")
 
 @dp.callback_query(F.data == "reset_session")
 async def cb_reset_s(cb: types.CallbackQuery):
-    global session_restarts; session_restarts = 0; await save_data(); await refresh_panels(); await cb.answer("Сессия сброшена")
+    global session_restarts; session_restarts = 0; await save_data(); await refresh_panels(); await cb.answer("Сброшено")
 
 @dp.callback_query(F.data == "tp_menu")
 async def tp_menu(cb: types.CallbackQuery):
@@ -317,28 +285,32 @@ async def tp_menu(cb: types.CallbackQuery):
 async def tp_add_start(cb: types.CallbackQuery, state: FSMContext):
     kb = [[InlineKeyboardButton(text="ВСЕ", callback_data="target_all")]]
     for acc in notifications: kb.append([InlineKeyboardButton(text=acc, callback_data=f"target_{acc}")])
-    await cb.message.edit_text("Выбери аккаунт:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-    await state.set_state(TechPause.choosing_target)
+    await cb.message.edit_text("Аккаунт:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)); await state.set_state(TechPause.choosing_target)
 
 @dp.callback_query(F.data.startswith("target_"), TechPause.choosing_target)
 async def tp_target(cb: types.CallbackQuery, state: FSMContext):
     target = cb.data.replace("target_", ""); await state.update_data(target=target)
-    await cb.message.edit_text(f"Минут для <b>{target}</b>?", parse_mode="HTML")
-    await state.set_state(TechPause.entering_time)
+    await cb.message.edit_text(f"Минут для {target}?"); await state.set_state(TechPause.entering_time)
 
 @dp.message(TechPause.entering_time)
 async def tp_time(m: types.Message, state: FSMContext):
     if not m.text.isdigit(): return
-    mins = int(m.text); d = await state.get_data(); now = time.time()
+    await state.update_data(mins=int(m.text))
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Авто-снятие", callback_data="tp_mode_auto"), InlineKeyboardButton(text="🔒 До конца", callback_data="tp_mode_hard")]])
+    await m.answer("Режим отключения паузы:", reply_markup=kb); await state.set_state(TechPause.choosing_mode)
+
+@dp.callback_query(F.data.startswith("tp_mode_"), TechPause.choosing_mode)
+async def tp_mode_fin(cb: types.CallbackQuery, state: FSMContext):
+    is_auto = "auto" in cb.data; d = await state.get_data(); now = time.time()
     targets = list(notifications.keys()) if d['target'] == "all" else [d['target']]
-    for t in targets: pause_data[t] = {"until": now + mins * 60, "auto_off": True}
-    await save_data(); await m.answer(f"✅ Пауза {mins}м."); await state.clear(); await refresh_panels()
+    for t in targets: pause_data[t] = {"until": now + d['mins'] * 60, "auto_off": is_auto}
+    await save_data(); await state.clear(); await cb.message.answer(f"✅ Готово."); await refresh_panels()
 
 @dp.callback_query(F.data == "tp_clear_all")
 async def tp_clear(cb: types.CallbackQuery):
     pause_data.clear(); await save_data(); await cb.answer("Очищено"); await refresh_panels()
 
-# --- Логика сервера ---
+# --- Сервер и Мониторинг ---
 async def handle_signal(request):
     try:
         d = await request.json(); u = d.get("username")
@@ -347,7 +319,6 @@ async def handle_signal(request):
             if u not in start_times: start_times[u] = time.time()
             accounts[u] = time.time()
             p, c = d.get("pollen", 0), d.get("capacity", 1)
-            # Если не хочешь чтобы было больше 100%, можно заменить на min(int((p/c)*100), 100)
             acc_stats[u] = {"h": format_honey(d.get("honey", 0)), "b": f"{int((p/c)*100)}%"}
             return web.Response(text="OK")
     except: pass
@@ -355,12 +326,8 @@ async def handle_signal(request):
 
 async def check_timeouts():
     now = time.time()
-    
-    # --- Очистка истекших пауз ---
-    expired_pauses = [u for u, pd in pause_data.items() if now >= pd.get('until', 0)]
-    for u in expired_pauses:
-        pause_data.pop(u, None)
-        
+    expired = [u for u, pd in pause_data.items() if now >= pd.get('until', 0)]
+    for u in expired: pause_data.pop(u, None)
     for u in list(accounts.keys()):
         if now - accounts[u] > 120:
             tags = " ".join(notifications.get(u, ["!"]))
@@ -368,7 +335,6 @@ async def check_timeouts():
                 try: await bot.send_message(cid, f"🚨 <b>{u}</b> ВЫЛЕТ!\n{tags}", parse_mode="HTML")
                 except: pass
             accounts.pop(u, None); start_times.pop(u, None); acc_stats.pop(u, None)
-            
     await save_data(); await refresh_panels()
 
 async def refresh_panels():
@@ -387,8 +353,7 @@ async def main():
     await download_font(); await load_data()
     asyncio.create_task(monitor_loop())
     app = web.Application(); app.router.add_post('/signal', handle_signal)
-    runner = web.AppRunner(app); await runner.setup()
-    await web.TCPSite(runner, '0.0.0.0', PORT).start()
+    runner = web.AppRunner(app); await runner.setup(); await web.TCPSite(runner, '0.0.0.0', PORT).start()
     await bot.delete_webhook(drop_pending_updates=True); await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
