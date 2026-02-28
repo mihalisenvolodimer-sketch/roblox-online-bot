@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiohttp import web
 
 # --- Настройки ---
-VERSION = "V5.5 BUGFIX"
+VERSION = "V5.6 ULTIMATE"
 TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 PORT = int(os.getenv("PORT", 8080))
@@ -29,6 +29,7 @@ db = None
 # Глобальные данные
 accounts, start_times, notifications, status_messages = {}, {}, {}, {}
 pause_data, acc_stats = {}, {}
+initial_honey, action_logs = {}, []
 total_restarts, session_restarts = 0, 0
 
 BG_URLS = ["https://wallpaperaccess.com/full/7500647.png", "https://wallpaperaccess.com/full/14038208.jpg"]
@@ -49,6 +50,11 @@ def format_honey(n):
             n /= 1000.0
         return f"{n:.1f}Q"
     except: return "0"
+
+def add_log(text):
+    now = datetime.datetime.now(timezone(timedelta(hours=2))).strftime("%H:%M:%S")
+    action_logs.insert(0, f"🕒 <code>{now}</code> — {text}")
+    if len(action_logs) > 10: action_logs.pop()
 
 async def download_font():
     if not os.path.exists(FONT_PATH):
@@ -72,7 +78,7 @@ async def get_avatar(username, session):
 
 # --- База Данных ---
 async def load_data():
-    global db, notifications, status_messages, total_restarts, session_restarts, start_times, accounts, pause_data
+    global db, notifications, status_messages, total_restarts, session_restarts, start_times, accounts, pause_data, action_logs, initial_honey
     if not REDIS_URL: return
     try:
         db = redis.from_url(REDIS_URL, decode_responses=True)
@@ -84,6 +90,8 @@ async def load_data():
             total_restarts = data.get("total_restarts", 0) + 1
             session_restarts = data.get("session_restarts", 0) + 1
             pause_data = data.get("pause_data", {})
+            action_logs = data.get("logs", [])
+            initial_honey = data.get("init_h", {})
             saved_accs = data.get("accounts", {})
             now = time.time()
             for u, p in saved_accs.items():
@@ -98,7 +106,7 @@ async def save_data():
         await db.set(DB_KEY, json.dumps({
             "notifs": notifications, "msgs": status_messages, "total_restarts": total_restarts,
             "session_restarts": session_restarts, "starts": start_times, "accounts": accounts,
-            "pause_data": pause_data
+            "pause_data": pause_data, "logs": action_logs, "init_h": initial_honey
         }))
     except: pass
 
@@ -125,9 +133,25 @@ async def generate_status_image(target_accounts, is_online_mode=True):
             draw.rounded_rectangle([30, y, width-30, y+row_h-10], fill=(0, 0, 0, 180), radius=15)
             av = await get_avatar(acc, session)
             if av: img.paste(av.resize((85, 85)), (45, y+10), av.resize((85, 85)))
-            draw.text((145, y+15), acc, font=f_m, fill=(255, 255, 255))
-            st = acc_stats.get(acc, {"h": "0", "b": "0%"})
-            draw.text((145, y+55), f"Honey: {st['h']} | Bag: {st['b']}", font=f_s, fill=(200, 200, 200))
+            
+            draw.text((145, y+12), acc, font=f_m, fill=(255, 255, 255))
+            st = acc_stats.get(acc, {"h": "0", "b": "0%", "raw_b": 0, "prof": "0"})
+            
+            # Текст меда и профита
+            draw.text((145, y+50), f"🍯 {st['h']} (+{st['prof']})", font=f_s, fill=(200, 200, 200))
+            
+            # Отрисовка полоски рюкзака
+            draw.text((145, y+75), "🎒 Bag:", font=f_s, fill=(200, 200, 200))
+            bar_x, bar_y, bar_w, bar_h = 220, y+78, 150, 14
+            draw.rounded_rectangle([bar_x, bar_y, bar_x+bar_w, bar_y+bar_h], fill=(80, 80, 80, 255), radius=5)
+            pct = min(100, st['raw_b'])
+            if pct > 0:
+                fill_w = int((pct / 100) * bar_w)
+                color = (50, 205, 50) if pct < 60 else ((255, 165, 0) if pct < 85 else (255, 69, 0))
+                draw.rounded_rectangle([bar_x, bar_y, bar_x+fill_w, bar_y+bar_h], fill=color, radius=5)
+            draw.text((bar_x+bar_w+10, y+75), st['b'], font=f_s, fill=(255, 255, 255))
+            
+            # Статус справа
             if acc in pause_data and now < pause_data[acc]['until']:
                 draw.text((width-220, y+35), "ПАУЗА", font=f_m, fill=(255, 165, 0))
             elif is_online_mode and acc in accounts:
@@ -152,15 +176,21 @@ def get_status_text():
                 text += f"🛠 <code>{u}</code> | <b>ПАУЗА ({mode}) {rem//60}м</b>\n"
             elif u in accounts:
                 d = int(now - start_times.get(u, now))
-                st = acc_stats.get(u, {"h": "0", "b": "0%"})
-                text += f"🟢 <code>{u}</code> | 🍯 <b>{st['h']}</b> | 🎒 <b>{st['b']}</b>\n"
+                st = acc_stats.get(u, {"h": "0", "b": "0%", "prof": "0"})
+                text += f"🟢 <code>{u}</code> | 🍯 <b>{st['h']} (+{st['prof']})</b> | 🎒 <b>{st['b']}</b>\n"
                 text += f"└ 🕒 <b>{d//3600}ч {(d%3600)//60}м в сети</b>\n\n"
     return text
 
 # --- Хендлеры ---
 @dp.message(Command("start"))
 async def cmd_start(m: types.Message):
-    await m.answer(f"<b>🐝 BSS {VERSION}</b>\n🔄 Общих рестартов бота: <b>{total_restarts}</b>\n\n/information — Статус\n/img — Картинка\n/list — Пинги\n/add [Ник] [Тег]", parse_mode="HTML")
+    await m.answer(f"<b>🐝 BSS {VERSION}</b>\n🔄 Общих рестартов бота: <b>{total_restarts}</b>\n\n/information — Статус\n/img — Картинка\n/logs — Логи событий\n/list — Пинги\n/add [Ник] [Тег]", parse_mode="HTML")
+
+@dp.message(Command("logs"))
+async def cmd_logs(m: types.Message):
+    if not action_logs: return await m.answer("Список логов пока пуст.")
+    res = "<b>📋 Последние 10 событий:</b>\n\n" + "\n".join(action_logs)
+    await m.answer(res, parse_mode="HTML")
 
 @dp.message(Command("information"))
 async def cmd_info(m: types.Message):
@@ -203,7 +233,7 @@ async def cmd_remove(m: types.Message):
     args = m.text.split(); acc = args[1] if len(args) > 1 else None
     if acc in notifications: del notifications[acc]; await save_data(); await m.answer(f"❌ {acc} удален.")
 
-# --- Админка (Рассылка и Тест вылета) ---
+# --- Админка ---
 @dp.message(Command("adm"))
 async def cmd_adm(m: types.Message):
     if m.from_user.username != ALLOWED_ADMIN: return
@@ -231,8 +261,7 @@ async def adm_bc(cb: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("bc_t_"))
 async def bc_step1(cb: types.CallbackQuery, state: FSMContext):
     use_t = cb.data == "bc_t_yes"; await state.update_data(has_title=use_t)
-    await cb.message.edit_text("Введите заголовок:" if use_t else "Введите текст:")
-    await state.set_state(PostCreation.waiting_for_title if use_t else PostCreation.waiting_for_text)
+    await cb.message.edit_text("Введите заголовок:" if use_t else "Введите текст:"); await state.set_state(PostCreation.waiting_for_title if use_t else PostCreation.waiting_for_text)
 
 @dp.message(PostCreation.waiting_for_title)
 async def bc_title(m: types.Message, state: FSMContext):
@@ -268,7 +297,7 @@ async def bc_send(cb: types.CallbackQuery, state: FSMContext):
             if d.get("photo_id"): await bot.send_photo(cid, d["photo_id"], caption=text, parse_mode="HTML")
             else: await bot.send_message(cid, text, parse_mode="HTML")
         except: pass
-    await cb.message.answer("✅ Отправлено."); await state.clear()
+    await cb.message.answer("✅ Отправлено."); add_log("Администратор сделал рассылку."); await state.clear()
 
 # --- Настройки и Тех Перерыв ---
 @dp.callback_query(F.data == "ask_reset")
@@ -282,7 +311,7 @@ async def cb_refresh(cb: types.CallbackQuery):
 
 @dp.callback_query(F.data == "reset_session")
 async def cb_reset_s(cb: types.CallbackQuery):
-    global session_restarts; session_restarts = 0; await save_data(); await refresh_panels(); await cb.answer("Сброшено")
+    global session_restarts; session_restarts = 0; initial_honey.clear(); add_log("Сброшена текущая сессия"); await save_data(); await refresh_panels(); await cb.answer("Сброшено")
 
 @dp.callback_query(F.data == "tp_menu")
 async def tp_menu(cb: types.CallbackQuery):
@@ -311,23 +340,47 @@ async def tp_time(m: types.Message, state: FSMContext):
 async def tp_mode_fin(cb: types.CallbackQuery, state: FSMContext):
     is_auto = "auto" in cb.data; d = await state.get_data(); now = time.time()
     targets = list(notifications.keys()) if d['target'] == "all" else [d['target']]
-    for t in targets: pause_data[t] = {"until": now + d['mins'] * 60, "auto_off": is_auto}
+    for t in targets: 
+        pause_data[t] = {"until": now + d['mins'] * 60, "auto_off": is_auto}
+        add_log(f"🛠 {t} ушел на паузу ({d['mins']}м)")
     await save_data(); await state.clear(); await cb.message.answer(f"✅ Готово."); await refresh_panels()
 
 @dp.callback_query(F.data == "tp_clear_all")
 async def tp_clear(cb: types.CallbackQuery):
-    pause_data.clear(); await save_data(); await cb.answer("Очищено"); await refresh_panels()
+    pause_data.clear(); add_log("🗑 Все паузы были сброшены вручную"); await save_data(); await cb.answer("Очищено"); await refresh_panels()
 
 # --- Сервер и Мониторинг ---
 async def handle_signal(request):
     try:
         d = await request.json(); u = d.get("username")
         if u:
-            if u in pause_data and pause_data[u].get("auto_off"): pause_data.pop(u, None)
-            if u not in start_times: start_times[u] = time.time()
+            # Снятие авто-паузы
+            if u in pause_data and pause_data[u].get("auto_off"): 
+                pause_data.pop(u, None)
+                add_log(f"✅ Пауза {u} снята автоматически")
+            
+            # Лог входа
+            if u not in start_times: 
+                start_times[u] = time.time()
+                add_log(f"🟢 {u} вошел в сеть")
+
             accounts[u] = time.time()
+            
+            # Трекер меда
+            raw_honey = float(d.get("honey", 0))
+            if u not in initial_honey:
+                initial_honey[u] = raw_honey
+            
+            profit = raw_honey - initial_honey[u]
+            
             p, c = d.get("pollen", 0), d.get("capacity", 1)
-            acc_stats[u] = {"h": format_honey(d.get("honey", 0)), "b": f"{int((p/c)*100)}%"}
+            raw_b = int((p/c)*100)
+            acc_stats[u] = {
+                "h": format_honey(raw_honey), 
+                "prof": format_honey(profit),
+                "b": f"{raw_b}%", 
+                "raw_b": raw_b
+            }
             return web.Response(text="OK")
     except: pass
     return web.Response(status=400)
@@ -335,16 +388,18 @@ async def handle_signal(request):
 async def check_timeouts():
     now = time.time()
     expired = [u for u, pd in pause_data.items() if now >= pd.get('until', 0)]
-    for u in expired: pause_data.pop(u, None)
+    for u in expired: 
+        pause_data.pop(u, None)
+        add_log(f"⏱ Время паузы {u} истекло")
     
     for u in list(accounts.keys()):
         if now - accounts[u] > 120:
-            # Отправляем уведомление только если аккаунт НЕ в списке пауз
             if u not in pause_data:
                 tags = " ".join(notifications.get(u, ["!"]))
                 for cid in status_messages:
                     try: await bot.send_message(cid, f"🚨 <b>{u}</b> ВЫЛЕТ!\n{tags}", parse_mode="HTML")
                     except: pass
+                add_log(f"🔴 {u} вылетел")
             accounts.pop(u, None); start_times.pop(u, None); acc_stats.pop(u, None)
             
     await save_data(); await refresh_panels()
@@ -356,6 +411,7 @@ async def refresh_panels():
         except: pass
 
 async def monitor_loop():
+    add_log("🚀 Сервер мониторинга запущен")
     while True:
         try: await check_timeouts()
         except: pass
