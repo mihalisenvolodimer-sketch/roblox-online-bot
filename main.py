@@ -138,7 +138,7 @@ async def generate_status_image(target_accounts, is_online_mode=True):
             st = acc_stats.get(acc, {"h": "0", "b": "0%", "raw_b": 0, "prof": "0"})
             
             # Текст меда и профита
-            draw.text((145, y+50), f" {st['h']} (+{st['prof']})", font=f_s, fill=(200, 200, 200))
+            draw.text((145, y+50), f"Honey: {st['h']} (+{st['prof']})", font=f_s, fill=(200, 200, 200))
             
             # Отрисовка полоски рюкзака
             draw.text((145, y+75), " Bag:", font=f_s, fill=(200, 200, 200))
