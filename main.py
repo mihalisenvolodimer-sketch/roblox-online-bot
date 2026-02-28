@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiohttp import web
 
 # --- Настройки ---
-VERSION = "V5.4 TOTAL"
+VERSION = "V5.5 BUGFIX"
 TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 PORT = int(os.getenv("PORT", 8080))
@@ -203,17 +203,25 @@ async def cmd_remove(m: types.Message):
     args = m.text.split(); acc = args[1] if len(args) > 1 else None
     if acc in notifications: del notifications[acc]; await save_data(); await m.answer(f"❌ {acc} удален.")
 
-# --- Админка (Рассылка) ---
+# --- Админка (Рассылка и Тест вылета) ---
 @dp.message(Command("adm"))
 async def cmd_adm(m: types.Message):
     if m.from_user.username != ALLOWED_ADMIN: return
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")], [InlineKeyboardButton(text="🧪 Тест вылета", callback_data="adm_test_dc")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")], [InlineKeyboardButton(text="🧪 Тест вылета", callback_data="adm_test_dc_menu")]])
     await m.answer("🕹 <b>Панель администратора:</b>", reply_markup=kb, parse_mode="HTML")
 
-@dp.callback_query(F.data == "adm_test_dc")
-async def cb_test_dc(cb: types.CallbackQuery):
+@dp.callback_query(F.data == "adm_test_dc_menu")
+async def cb_test_dc_menu(cb: types.CallbackQuery):
     if not accounts: return await cb.answer("Нет аккаунтов онлайн!", show_alert=True)
-    acc = list(accounts.keys())[0]; accounts.pop(acc, None); await cb.answer(f"Тест: {acc} отключен!", show_alert=True); await refresh_panels()
+    kb = [[InlineKeyboardButton(text=acc, callback_data=f"tdc_{acc}")] for acc in accounts.keys()]
+    await cb.message.edit_text("🧪 Выбери аккаунт для теста вылета:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(F.data.startswith("tdc_"))
+async def cb_test_dc_exec(cb: types.CallbackQuery):
+    acc = cb.data.replace("tdc_", "")
+    if acc in accounts: accounts.pop(acc, None); await cb.answer(f"Тест: {acc} отключен!", show_alert=True)
+    else: await cb.answer("Уже оффлайн!", show_alert=True)
+    await refresh_panels()
 
 @dp.callback_query(F.data == "adm_broadcast")
 async def adm_bc(cb: types.CallbackQuery):
@@ -328,13 +336,17 @@ async def check_timeouts():
     now = time.time()
     expired = [u for u, pd in pause_data.items() if now >= pd.get('until', 0)]
     for u in expired: pause_data.pop(u, None)
+    
     for u in list(accounts.keys()):
         if now - accounts[u] > 120:
-            tags = " ".join(notifications.get(u, ["!"]))
-            for cid in status_messages:
-                try: await bot.send_message(cid, f"🚨 <b>{u}</b> ВЫЛЕТ!\n{tags}", parse_mode="HTML")
-                except: pass
+            # Отправляем уведомление только если аккаунт НЕ в списке пауз
+            if u not in pause_data:
+                tags = " ".join(notifications.get(u, ["!"]))
+                for cid in status_messages:
+                    try: await bot.send_message(cid, f"🚨 <b>{u}</b> ВЫЛЕТ!\n{tags}", parse_mode="HTML")
+                    except: pass
             accounts.pop(u, None); start_times.pop(u, None); acc_stats.pop(u, None)
+            
     await save_data(); await refresh_panels()
 
 async def refresh_panels():
