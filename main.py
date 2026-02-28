@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiohttp import web
 
 # --- Настройки ---
-VERSION = "V5.6 ULTIMATE"
+VERSION = "V6.0"
 TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 PORT = int(os.getenv("PORT", 8080))
@@ -138,10 +138,10 @@ async def generate_status_image(target_accounts, is_online_mode=True):
             st = acc_stats.get(acc, {"h": "0", "b": "0%", "raw_b": 0, "prof": "0"})
             
             # Текст меда и профита
-            draw.text((145, y+50), f"🍯 {st['h']} (+{st['prof']})", font=f_s, fill=(200, 200, 200))
+            draw.text((145, y+50), f" {st['h']} (+{st['prof']})", font=f_s, fill=(200, 200, 200))
             
             # Отрисовка полоски рюкзака
-            draw.text((145, y+75), "🎒 Bag:", font=f_s, fill=(200, 200, 200))
+            draw.text((145, y+75), " Bag:", font=f_s, fill=(200, 200, 200))
             bar_x, bar_y, bar_w, bar_h = 220, y+78, 150, 14
             draw.rounded_rectangle([bar_x, bar_y, bar_x+bar_w, bar_y+bar_h], fill=(80, 80, 80, 255), radius=5)
             pct = min(100, st['raw_b'])
