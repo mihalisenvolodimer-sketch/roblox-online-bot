@@ -4,7 +4,14 @@ import redis.asyncio as redis
 from PIL import Image, ImageDraw, ImageFont
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.types import (
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton, 
+    BufferedInputFile, 
+    InlineQuery, 
+    InlineQueryResultArticle, 
+    InputTextMessageContent
+)
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiohttp import web
@@ -447,6 +454,72 @@ async def tp_mode_fin(cb: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "tp_clear_all")
 async def tp_clear(cb: types.CallbackQuery):
     pause_data.clear(); add_log("🗑 Все паузы были сброшены вручную"); await save_data(); await cb.answer("Очищено"); await refresh_panels()
+
+
+# --- Инлайн Режим ---
+@dp.inline_query()
+async def inline_handler(query: InlineQuery):
+    text = query.query.strip().lower()
+    results = []
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔄 Обновить данные", callback_data="refresh_inline_status")
+    ]])
+
+    results.append(
+        InlineQueryResultArticle(
+            id="inline_status",
+            title="📊 Мониторинг Улья",
+            description="Текущий статус аккаунтов (текст)",
+            input_message_content=InputTextMessageContent(
+                message_text=get_status_text(),
+                parse_mode="HTML"
+            ),
+            reply_markup=kb
+        )
+    )
+
+    if text.startswith("img"):
+        args = text.split()[1:]
+        is_manual = len(args) > 0
+        t_accs = args if is_manual else list(set(list(accounts.keys()) + list(pause_data.keys())))
+        
+        if t_accs:
+            results.append(
+                InlineQueryResultArticle(
+                    id="inline_img_trigger",
+                    title="🖼 Сгенерировать Инфо-Графику",
+                    description=f"Для: {', '.join(t_accs[:3])}...",
+                    input_message_content=InputTextMessageContent(
+                        message_text=f"/img {' '.join(t_accs)}" 
+                    )
+                )
+            )
+
+    await query.answer(results, cache_time=5)
+
+@dp.callback_query(F.data == "refresh_inline_status")
+async def cb_refresh_inline(cb: types.CallbackQuery):
+    if cb.inline_message_id:
+        new_text = get_status_text()
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔄 Обновить данные", callback_data="refresh_inline_status")
+        ]])
+        
+        try:
+            await bot.edit_message_text(
+                inline_message_id=cb.inline_message_id,
+                text=new_text,
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+            await cb.answer("Данные обновлены!")
+        except Exception as e:
+            if "is not modified" in str(e).lower():
+                await cb.answer("Изменений нет")
+            else:
+                await cb.answer("Ошибка обновления")
+
 
 # --- Сервер и Мониторинг ---
 async def handle_signal(request):
